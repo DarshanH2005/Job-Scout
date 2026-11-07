@@ -1,6 +1,6 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const content = $("#content"), modal = $("#dialog"), body = $("#dialog-content");
-const S = {page:"jobs", info:null, offset:0, search:"", region:"", latest:false, levels:"relevant", recent:"0",
+const S = {page:"jobs", info:null, offset:0, search:"", region:"", latest:false, levels:"relevant", recent:"0", hidden:false,
   companies:[], companySearch:"", source:"", job:null, item:null, people:[], serial:0};
 const regions = {india_remote:"Remote from India",india:"India-based",us_remote:"U.S. remote",unclear:"Eligibility unclear",other:"Other location"};
 const channels = {linkedin:"LinkedIn",gmail:"Gmail",community:"Referral community"};
@@ -83,19 +83,20 @@ function jobRow(job) {
   return `<article class="panel job-row"><div class="job-mark" aria-hidden="true">${E(mark)}</div>
     <div><div class="job-company">${E(job.company)} · ${job.posted_at?"Posted":"First seen"} ${date(job.posted_at||job.first_seen)}</div>
     <button class="job-title" data-action="job" data-id="${job.id}">${E(job.title)}</button>
-    <div class="meta">${tag(regions[job.region],job.region.startsWith("india")?"good":"")}${freshness}${job.applied_at?tag("Applied","good"):""}</div>
+    <div class="meta">${tag(regions[job.region],job.region.startsWith("india")?"good":"")}${freshness}${job.hidden?tag("Hidden from feed"):""}${job.applied_at?tag("Applied","good"):""}</div>
     <div class="micro">${E(job.reason)}</div></div><div class="actions">${B("Review","job",job.id,"small")}${L("Apply",job.apply_url)}</div></article>`;
 }
 async function refreshJobs() {
   const box=$("#job-results");
   if (!box) return;
-  const serial=++S.serial, saved=S.page==="saved";
-  const params=new URLSearchParams({view:saved?"saved":"latest",region:S.region,search:S.search,latest:S.latest,
+  const serial=++S.serial, saved=S.page==="saved", hidden=!saved&&S.hidden;
+  const params=new URLSearchParams({view:saved?"saved":hidden?"hidden":"latest",region:S.region,search:S.search,latest:S.latest,
     all_levels:S.levels==="all",early_only:S.levels==="early",recent_days:S.recent,offset:S.offset});
   const {items,more}=await api(`/jobs?${params}`);
   if (!box.isConnected||serial!==S.serial) return;
   box.innerHTML=items.length?`<div class="job-list">${items.map(jobRow).join("")}</div>`:
     saved?empty("Your shortlist is empty","Review a role and save it to come back to it later.",'<a href="#jobs">Browse the job feed →</a>'):
+    hidden?empty("No hidden jobs in this view","Roles you hide appear here. Clear your search and location filters to see all of them."):
     !S.info.scan?.finished_at&&!S.search?empty("Ready for your first scan","Start with the employer feeds already configured in your watchlist.",B("Find latest jobs","scan","","primary")):
     empty("No jobs in this view","Try a broader date range, experience level, or location.");
   if (S.offset||more) box.innerHTML+=`<div class="pager">${S.offset?B("← Previous","prev","","small"):"<span></span>"}
@@ -103,13 +104,14 @@ async function refreshJobs() {
   box.setAttribute("aria-busy","false");
 }
 function jobPage() {
-  const {stats,scan}=S.info, saved=S.page==="saved";
+  const {stats,scan}=S.info, saved=S.page==="saved", hidden=!saved&&S.hidden;
+  const switcher=saved?"":B(hidden?"Back to job feed":`Hidden jobs (${num(stats.hidden)})`,"toggle-hidden","","small");
   const tiles=[[stats.companies,"Companies watched","⌗"],[stats.configured,"Automated feeds","↻"],[scan?.finished_at?stats.matches:null,"Matching openings","◎"]];
   return `${saved?"":`<div class="stats">${tiles.map(([n,label,icon])=>`<div class="stat"><span class="stat-icon" aria-hidden="true">${icon}</span><div><strong>${n===null?"—":num(n)}</strong><small>${label}</small></div></div>`).join("")}</div>`}
-    <div class="work-grid"><div>${head(saved?"Saved jobs":"Latest openings",saved?"Keep track of roles you’re considering and applications you’ve sent.":"Early-career software, data and AI roles from employer feeds.","",saved?"h1":"h2")}
+    <div class="work-grid"><div>${head(saved?"Saved jobs":hidden?"Hidden jobs":"Latest openings",saved?"Keep track of roles you’re considering and applications you’ve sent.":hidden?"Review roles you’ve hidden and restore any you want to see again.":"Early-career software, data and AI roles from employer feeds.",switcher,saved?"h1":"h2")}
     <div class="filters"><input type="search" id="job-search" aria-label="Search jobs" placeholder="Search roles or companies" value="${E(S.search)}">
     <select id="region" aria-label="Location">${select({"":"All locations",...regions},S.region)}</select></div>
-    ${saved?"":`<div class="filters shortlist-filters">
+    ${saved||hidden?"":`<div class="filters shortlist-filters">
     <select id="levels" aria-label="Experience level">${select({relevant:"Relevant roles",early:"Explicit early-career roles",all:"All experience levels"},S.levels)}</select>
     <select id="recent" aria-label="Posting age">${select({"0":"Any posting date","7":"Last 7 days","30":"Last 30 days"},S.recent)}</select>
     <label><input type="checkbox" id="latest" ${S.latest?"checked":""}> New since last scan</label></div>`}
@@ -224,7 +226,8 @@ async function openJob(id) { S.job=await api(`/jobs/${id}`); S.people=[]; showJo
 function showJob() {
   const job=S.job;
   dialog(job.title,`${job.company} · ${regions[job.region]}`,`<div class="actions">
-    ${L("Apply on company site",job.apply_url,"primary")}${B(job.saved?"Remove from saved":"Save job","save",job.id)}${B(job.applied_at?"Undo applied":"Mark applied","apply",job.id)}</div>
+    ${L("Apply on company site",job.apply_url,"primary")}${B(job.saved?"Remove from saved":"Save job","save",job.id)}${B(job.applied_at?"Undo applied":"Mark applied","apply",job.id)}
+    ${B(job.hidden?"Restore to job feed":"Hide from job feed","hide",job.id)}</div>
     <p class="micro">${job.posted_at?`Employer posted ${date(job.posted_at)} · `:""}First seen ${date(job.first_seen)}${job.archived?" · No longer on feed":job.source_status==="failed"?" · Latest feed check failed":""}</p>
     ${job.evidence?`<div class="evidence"><strong>Location evidence</strong><br>${E(job.evidence)}</div>`:""}
     ${job.description?`<details><summary>View job description</summary><div class="description">${E(job.description)}</div></details>`:""}
@@ -318,8 +321,14 @@ async function mailThreads(id) {
 
 
 async function jobFlag(id,kind) {
-  S.job=await api(`/jobs/${id}`,"PATCH",kind==="save"?{saved:!S.job.saved}:{applied:!S.job.applied_at});
-  showJob(); await refreshJobs();
+  const title=$("#dialog-title");
+  const changes={save:{saved:!S.job.saved},apply:{applied:!S.job.applied_at},hide:{hidden:!S.job.hidden}};
+  const job=await api(`/jobs/${id}`,"PATCH",changes[kind]);
+  if(modal.open&&title.isConnected) {S.job=job;showJob();}
+  if(kind==="hide") {
+    await refreshState(); await render();
+    notice(job.hidden?"Job hidden from the feed.":"Job restored to the feed.");
+  } else await refreshJobs();
 }
 async function eventAction(id,type) {
   const title=$("#dialog-title"), data={action:type,note:$("#event-note").value};
@@ -343,7 +352,8 @@ async function act(action,id) {
     close:()=>modal.close(), command:commands, import:jobImport, scan:startScan, company:()=>employer(Number(id)), job:()=>openJob(id),
     prev:()=>{S.offset=Math.max(0,S.offset-30);return refreshJobs();},
     next:()=>{S.offset+=30;return refreshJobs();},
-    save:()=>jobFlag(id,"save"),apply:()=>jobFlag(id,"apply"),"job-back":showJob,find:()=>findPeople(id),
+    "toggle-hidden":()=>{S.hidden=!S.hidden;S.offset=0;return render();},
+    save:()=>jobFlag(id,"save"),apply:()=>jobFlag(id,"apply"),hide:()=>jobFlag(id,"hide"),"job-back":showJob,find:()=>findPeople(id),
     person:()=>person(id===""?-1:Number(id)),conversation:()=>openConversation(id),
     "copy-query":()=>copy(S.query),"copy-message":()=>copy($("#draft-text").value),
     "copy-follow-up":()=>copy($("#follow-up-text").value),

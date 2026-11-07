@@ -48,6 +48,7 @@ class JobInput(BaseModel):
 class JobFlags(BaseModel):
     saved: bool | None = None
     applied: bool | None = None
+    hidden: bool | None = None
 
 
 class ContactInput(BaseModel):
@@ -337,6 +338,8 @@ def create_app(db_path=None, seed=True):
         with store.connect() as conn:
             if data.saved is not None:
                 conn.execute("UPDATE jobs SET saved=? WHERE id=?", (data.saved, job_id))
+            if data.hidden is not None:
+                conn.execute("UPDATE jobs SET hidden=? WHERE id=?", (data.hidden, job_id))
             if data.applied is not None:
                 if data.applied:
                     conn.execute("UPDATE jobs SET applied_at=coalesce(applied_at,?), saved=1 WHERE id=?", (now(), job_id))

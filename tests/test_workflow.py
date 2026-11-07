@@ -310,13 +310,14 @@ def test_follow_up_keeps_request_and_send_history(desk):
     assert action(client, item, "replied")["due_at"] is None
 
 
-def test_follow_up_migration_keeps_existing_conversations(desk):
+def test_schema_migration_keeps_existing_conversations_and_jobs(desk):
     client, store = desk
     item = action(client, create_draft(client, saved_job(client)), "sent")
     with store.connect() as conn:
         conn.execute("ALTER TABLE events DROP COLUMN message")
         conn.execute("ALTER TABLE outreach DROP COLUMN follow_up_draft")
         conn.execute("ALTER TABLE outreach DROP COLUMN conversation_url")
+        conn.execute("ALTER TABLE jobs DROP COLUMN hidden")
     store.initialize(seed=False)
     store.initialize(seed=False)
     existing = store.outreach(item["id"])
@@ -324,6 +325,33 @@ def test_follow_up_migration_keeps_existing_conversations(desk):
     assert existing["follow_up_draft"] == ""
     assert existing["conversation_url"] == ""
     assert existing["events"][0]["kind"] == "sent"
+    assert store.job(item["job_id"])["hidden"] == 0
+
+
+def test_hidden_job_survives_scan_without_losing_saved_application_or_referral(desk, monkeypatch):
+    client, _ = desk
+    register(client)
+
+    async def fetch(_client, _company, _limit):
+        return [sample()], None
+
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    scan(client)
+    job = result(client.get("/api/jobs"))["items"][0]
+    item = create_draft(client, job)
+    path = f"/api/jobs/{job['id']}"
+    original = result(client.patch(path, json={"saved": True, "applied": True}))
+    hidden = result(client.patch(path, json={"hidden": True}))
+    assert hidden["saved"] and hidden["applied_at"] == original["applied_at"]
+    assert result(client.get("/api/jobs"))["items"] == []
+    assert result(client.get("/api/state"))["stats"]["hidden"] == 1
+    assert result(client.get("/api/state"))["stats"]["matches"] == 0
+    assert result(client.get("/api/jobs?view=saved"))["items"][0]["hidden"] == 1
+    scan(client)
+    assert result(client.get("/api/jobs?view=hidden"))["items"][0]["id"] == job["id"]
+    assert result(client.get(f"/api/outreach/{item['id']}"))["state"] == "draft"
+    assert result(client.patch(path, json={"hidden": False}))["hidden"] == 0
+    assert result(client.get("/api/jobs"))["items"][0]["id"] == job["id"]
 
 
 def test_conversation_link_is_separate_from_contact_source_and_draft(desk):

@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, new_scan INTEGER REFERENCES scans(id),
     misses INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
     manual INTEGER NOT NULL DEFAULT 0, saved INTEGER NOT NULL DEFAULT 0, applied_at TEXT,
+    hidden INTEGER NOT NULL DEFAULT 0,
     UNIQUE(company_id, external_id)
 );
 CREATE INDEX IF NOT EXISTS jobs_by_url ON jobs(company_id, canonical_url);
@@ -98,6 +99,8 @@ class Store:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
             conn.execute("BEGIN IMMEDIATE")
+            if not any(row["name"] == "hidden" for row in conn.execute("PRAGMA table_info(jobs)")):
+                conn.execute("ALTER TABLE jobs ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
             if not any(row["name"] == "follow_up_draft" for row in conn.execute("PRAGMA table_info(outreach)")):
                 conn.execute("ALTER TABLE outreach ADD COLUMN follow_up_draft TEXT NOT NULL DEFAULT ''")
             if not any(row["name"] == "conversation_url" for row in conn.execute("PRAGMA table_info(outreach)")):
@@ -148,8 +151,9 @@ class Store:
             (SELECT COUNT(*) FROM companies) AS companies,
             (SELECT COUNT(*) FROM companies WHERE enabled AND provider<>'') AS configured,
             (SELECT COUNT(*) FROM jobs j JOIN companies c ON c.id=j.company_id
-              WHERE j.archived=0 AND j.score>0 AND (c.enabled=1 OR j.manual=1)) AS matches,
+              WHERE j.archived=0 AND j.hidden=0 AND j.score>0 AND (c.enabled=1 OR j.manual=1)) AS matches,
             (SELECT COUNT(*) FROM jobs WHERE saved=1 OR applied_at IS NOT NULL) AS saved,
+            (SELECT COUNT(*) FROM jobs WHERE hidden=1) AS hidden,
             (SELECT COUNT(*) FROM outreach WHERE state='waiting' AND due_at<=?) AS due
         """, (now(),))
 
@@ -198,8 +202,10 @@ class Store:
         clauses = []
         if view == "saved":
             clauses.append("(j.saved=1 OR j.applied_at IS NOT NULL)")
+        elif view == "hidden":
+            clauses.append("j.hidden=1")
         else:
-            clauses.append("j.archived=0 AND (c.enabled=1 OR j.manual=1)")
+            clauses.append("j.archived=0 AND j.hidden=0 AND (c.enabled=1 OR j.manual=1)")
             if early_only:
                 clauses.append("j.score>=?")
                 args.append(EARLY_SCORE)
@@ -221,7 +227,7 @@ class Store:
                    WHEN 'unclear' THEN 3 ELSE 4 END, c.status='failed', j.score DESC,
                    coalesce(julianday(j.posted_at),julianday(j.first_seen)) DESC, j.id DESC"""
         return self.all(f"""SELECT j.id,j.title,j.location,j.url,j.apply_url,j.posted_at,j.first_seen,j.last_seen,j.new_scan,
-                                   j.region,j.evidence,j.reason,j.score,j.saved,j.applied_at,j.archived,j.manual,
+                                   j.region,j.evidence,j.reason,j.score,j.saved,j.applied_at,j.archived,j.manual,j.hidden,
                                    c.name AS company,c.provider,c.status AS source_status
                             FROM jobs j JOIN companies c ON c.id=j.company_id WHERE {where}
                             ORDER BY {order} LIMIT 31 OFFSET ?""", (*args, offset))
