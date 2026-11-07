@@ -26,6 +26,10 @@ US = re.compile(r"\b(?:(?i:united states|north america|us-only)|U\.?S\.?A?\.?)\b
 WORLDWIDE = re.compile(r"\b(worldwide|work from anywhere in the world|globally remote|remote globally|remote anywhere in the world)\b", re.I)
 REMOTE = re.compile(r"\b(remote|work from home|distributed)\b", re.I)
 REGIONAL_TEXT = re.compile(r"\b(remote|eligible|authorized|reside|based|locations?|anywhere|work from)\b", re.I)
+FULL_TIME_OFFICE = re.compile(
+    r"\b(?:work|working|be)\b[^.!?\n]{0,90}\boffice\b[^.!?\n]{0,48}\b(?:5|five)\s+days\s*(?:/|a\s+|per\s+)week\b", re.I
+)
+GENERAL_REMOTE_POLICY = re.compile(r"\bfor\s+(?:(?:us|u\.s\.)[- ]based\s+)?roles\s+open\s+to\s+remote\s+work\b", re.I)
 RESTRICTION = re.compile(r"\b(only|must|within|eligible|authorized|based|limited|available)\b", re.I)
 US_REMOTE = re.compile(r"\b(?:remote\s*[-–—,:(/|]*\s*(?:us|usa|united states)\b|(?:us|usa|united states)\s*[-–—,:(/|]*\s*remote\b)", re.I)
 ROLE = re.compile(
@@ -40,7 +44,7 @@ SENIOR = re.compile(r"\b(senior|sr\.?|intermediate|mid[ -]level|staff|principal|
 EARLY_SCORE = 90
 YEARS = re.compile(
     r"(?<![\d.])\b(?P<minimum>\d{1,2})\s*(?:(?:[-–]|to)\s*\d{1,2}|\+|or more)?\s*years?\s+"
-    r"(?:of\s+(?:[^\n.!?;:]{0,75}\s+)?experience\b|(?:working|building|developing|designing|managing)\b)", re.I
+    r"(?:of\s+(?:[^\n.!?;:]{0,75}\s+)?experience\b|experience\b|(?:working|building|developing|designing|managing)\b)", re.I
 )
 
 
@@ -123,6 +127,10 @@ def board_from_job_url(value):
 def geography(location, workplace, description):
     source = f"{location} · {workplace}" if workplace else location
     remote = bool(REMOTE.search(source))
+    lines = re.split(r"\n|(?<=[.!?])\s+(?=[A-Z])", description[:18000])
+    office = next((line for line in lines if len(line) < 420 and FULL_TIME_OFFICE.search(line)), None)
+    if office:
+        return ("india" if INDIA.search(location) or INDIA.search(office) else "other"), office
     if INDIA.search(location):
         india_remote = bool(REMOTE.search(workplace)) or any(
             INDIA.search(part) and REMOTE.search(part) for part in re.split(r"[;|]", location)
@@ -133,8 +141,8 @@ def geography(location, workplace, description):
     if US_REMOTE.search(source):
         return "us_remote", source
 
-    lines = re.split(r"\n|(?<=[.!?])\s+(?=[A-Z])", description[:18000])
-    candidates = [line for line in lines if len(line) < 420 and REGIONAL_TEXT.search(line)]
+    candidates = [line for line in lines if len(line) < 420 and REGIONAL_TEXT.search(line)
+                  and not GENERAL_REMOTE_POLICY.search(line)]
     us_only = next((line for line in candidates if US.search(line) and
                     (US_REMOTE.search(line) or (RESTRICTION.search(line) and (remote or REMOTE.search(line))))), None)
     if us_only:

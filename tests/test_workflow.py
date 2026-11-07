@@ -253,6 +253,16 @@ def test_shortlist_experience_and_posting_age(desk):
     assert ranged["score"] > 0
 
 
+def test_posting_requirements_take_precedence_over_general_remote_policy():
+    boilerplate = "For US-based roles open to remote work, we hire only in certain states."
+    office = "Are able to work in our San Francisco office 5 days/week."
+    assert geography("San Francisco Office", "On-site", boilerplate + "\n" + office) == ("other", office)
+    assert geography("San Francisco Office", "", boilerplate)[0] == "other"
+    assert geography("Remote - US", "", boilerplate)[0] == "us_remote"
+    assert build_job("3", "Software Engineer (L3)", "", "India", "Remote",
+                     "5-7 years experience writing production-grade code.", "https://sample.example/3")["score"] == 0
+
+
 @pytest.mark.parametrize(("retry_after", "expected"), [("0", 2), ("120", 1)])
 def test_temporary_feed_retry_respects_delay(retry_after, expected):
     requests = []
