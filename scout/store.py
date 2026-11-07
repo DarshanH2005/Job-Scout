@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS outreach (
     draft TEXT NOT NULL, follow_up_draft TEXT NOT NULL DEFAULT '', conversation_url TEXT NOT NULL DEFAULT '',
     state TEXT NOT NULL DEFAULT 'draft', created_at TEXT NOT NULL,
     sent_at TEXT, due_at TEXT, checked_at TEXT, thread_id TEXT UNIQUE, mail_account TEXT, mail_anchor INTEGER, mail_peer TEXT,
+    gmail_send_pending TEXT NOT NULL DEFAULT '', gmail_sent INTEGER NOT NULL DEFAULT 0,
     UNIQUE(job_id, contact_id, channel)
 );
 CREATE TABLE IF NOT EXISTS events (
@@ -113,6 +114,11 @@ class Store:
                 conn.execute("ALTER TABLE outreach ADD COLUMN follow_up_draft TEXT NOT NULL DEFAULT ''")
             if not any(row["name"] == "conversation_url" for row in conn.execute("PRAGMA table_info(outreach)")):
                 conn.execute("ALTER TABLE outreach ADD COLUMN conversation_url TEXT NOT NULL DEFAULT ''")
+            outreach_columns = {row["name"] for row in conn.execute("PRAGMA table_info(outreach)")}
+            if "gmail_send_pending" not in outreach_columns:
+                conn.execute("ALTER TABLE outreach ADD COLUMN gmail_send_pending TEXT NOT NULL DEFAULT ''")
+            if "gmail_sent" not in outreach_columns:
+                conn.execute("ALTER TABLE outreach ADD COLUMN gmail_sent INTEGER NOT NULL DEFAULT 0")
             contact_columns = {row["name"] for row in conn.execute("PRAGMA table_info(contacts)")}
             if "profile_url" not in contact_columns:
                 conn.execute("ALTER TABLE contacts ADD COLUMN profile_url TEXT NOT NULL DEFAULT ''")

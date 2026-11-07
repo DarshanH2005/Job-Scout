@@ -201,12 +201,12 @@ function settings() {
     <div class="actions"><button class="button">Save key</button>${search_configured?B("Remove saved key","forget-brave","","small"):""}</div></form>`}</section>
     <section class="panel padded"><h3>Message drafts</h3><p>Templates use the chosen job, contact, and details you enter. A rewrite sends the draft text to the model you configure.</p>
     ${tag(rewrite_configured?"Rewrite available":"Templates active","good")}<p class="section">Optional settings <code>SCOUT_OPENAI_KEY</code> and <code>SCOUT_OPENAI_MODEL</code>.</p></section>
-    <section class="panel padded"><h3>Gmail reply checks</h3><p>Job Scout checks message headers for linked conversations every ten minutes while the app runs.</p>
+    <section class="panel padded"><h3>Gmail sending and reply checks</h3><p>Send from a referral in Job Scout and track replies to that thread. Job Scout checks linked message headers every ten minutes while the app runs.</p>
     ${mail.account?`<p><strong>${E(mail.account)}</strong><br>Last check ${date(mail.checked_at,true)}</p>
-    <div class="actions">${B("Check Gmail","mail-check","","small")}${B("Disconnect","mail-disconnect","","small danger")}</div>
-    <p class="section">Apply a <strong>Job Scout</strong> label in Gmail, then link the thread from a sent Gmail referral here.</p>`:
+    <div class="actions">${mail.send_enabled?tag("Direct sending enabled","good"):B("Enable Gmail sending","mail-connect-send","","small")}${B("Check Gmail","mail-check","","small")}${B("Disconnect","mail-disconnect","","small danger")}</div>
+    <p class="section">Job Scout links threads it sends. To link a message you sent in Gmail, first apply the <strong>Job Scout</strong> label there.</p>`:
     `<p>Choose your Google Desktop OAuth client JSON. See the README for Google Cloud setup.</p>
-    ${mail.configured?B("Connect Gmail","mail-connect","","primary"):tag("OAuth setup needed","warn")}
+    ${mail.configured?`<div class="actions">${B("Connect Gmail for sending and replies","mail-connect-send","","primary")}${B("Connect for replies only","mail-connect","","small")}</div>`:tag("OAuth setup needed","warn")}
     ${mail.from_env?"":`<form class="form section" data-form="google"><label>Google Desktop OAuth client JSON
     <input type="file" name="file" accept=".json,application/json" required></label>
     <div class="actions"><button class="button">Save client</button>${mail.configured?B("Remove saved client","forget-google","","small"):""}</div></form>`}`}
@@ -346,6 +346,9 @@ function handoffLinks(item) {
   }
   let channel = "";
   if (item.conversation_url) channel = L("Open conversation",item.conversation_url);
+  else if (item.channel === "gmail" && item.thread_id && item.mail_account) {
+    channel = L("Open Gmail thread",`https://mail.google.com/mail/u/?authuser=${encodeURIComponent(item.mail_account)}#all/${encodeURIComponent(item.thread_id)}`);
+  }
   else if (profile) channel = L("Open LinkedIn profile",profile);
   else if (item.channel === "linkedin") {
     const query = encodeURIComponent(`${item.person} ${item.company}`);
@@ -361,11 +364,15 @@ function handoffLinks(item) {
 }
 function showConversation() {
   const i=S.item, waiting=i.state==="waiting";
+  const {mail}=S.info, isGmail=i.channel==="gmail";
+  const sendRequest=isGmail&&mail.send_enabled&&i.email&&!i.gmail_send_pending;
+  const sendFollowUp=isGmail&&mail.send_enabled&&i.thread_id&&i.mail_account===mail.account&&!i.gmail_send_pending;
   const original = i.events.find(e=>e.kind==="sent"&&e.message)?.message || i.draft;
   const event=(label,action,style="small")=>B(label,`event-${action}`,i.id,style);
   dialog(i.person,`${i.company} · ${channels[i.channel]} · ${stages[i.state]}`,`<p class="micro">${E(i.job_title)}${i.due_at?` · Next check ${date(i.due_at)}`:""}</p>
     ${S.returnJob?`<div class="actions">${B("Back to job","job",S.returnJob,"small")}</div>`:""}
     <div class="actions" id="handoff-links">${handoffLinks(i)}</div>
+    ${i.gmail_send_pending?`<p class="evidence">Gmail delivery is unconfirmed. Check Gmail Sent before recording the send here.</p>`:""}
     ${["linkedin","gmail"].includes(i.channel)?`<details class="section"><summary>Edit ${i.channel==="linkedin"?"LinkedIn profile":"Gmail recipient"}</summary>
       <form class="form" data-form="contact-handoff" data-id="${i.id}">
         ${i.channel==="linkedin"?`<label>LinkedIn profile URL<input name="profile_url" type="url" maxlength="1800" value="${E(i.profile_url)}"></label>`:
@@ -373,18 +380,19 @@ function showConversation() {
           <span class="hint">Gmail opens with the recipient and subject. Copy your message here and paste it into Gmail before sending.</span>`}
         <div><button class="button small">Save contact handoff</button></div></form></details>`:""}
     ${i.state==="draft"?`<form class="form" data-form="message" data-id="${i.id}"><label>Editable message<textarea id="draft-text" name="text" maxlength="4000" required>${E(i.draft)}</textarea></label>
-    <div class="actions">${B("Copy message","copy-message","","primary")}<button class="button">Save edits</button>${S.info.rewrite_configured?B("AI rewrite","rewrite"):""}</div></form>`:
+    ${sendRequest?`<p class="hint">From ${E(mail.account)} to ${E(i.email)}<br>Subject: ${E(`Referral request for ${i.job_title}`)}</p>`:""}
+    <div class="actions">${sendRequest?B("Send via Gmail","gmail-send",i.id,"primary"):""}${B("Copy message","copy-message","",sendRequest?"":"primary")}<button class="button">Save edits</button>${S.info.rewrite_configured?B("AI rewrite","rewrite"):""}</div></form>`:
     `<details><summary>Original request</summary><div class="description">${E(original)}</div></details>`}
     ${waiting?`<section class="section"><p class="eyebrow">FOLLOW-UP</p>
     <form class="form" data-form="follow-up" data-id="${i.id}">
       <label>Follow-up draft<textarea id="follow-up-text" name="text" maxlength="4000" required>${E(i.follow_up_draft || followUpText(i))}</textarea></label>
-      <p class="hint">Send it in the original conversation, then record the send here.</p>
-      <div class="actions">${B("Copy follow-up","copy-follow-up","","primary")}<button class="button">Save draft</button>
+      <p class="hint">${sendFollowUp?`Send to ${E(i.mail_peer)} in the original Gmail thread.`:"Send it in the original conversation, then record the send here."}</p>
+      <div class="actions">${sendFollowUp?B("Send Gmail follow-up","gmail-follow-up",i.id,"primary"):""}${B("Copy follow-up","copy-follow-up","",sendFollowUp?"":"primary")}<button class="button">Save draft</button>
       ${event("Record follow-up sent","followed_up","")}</div>
     </form></section>`:""}
     <section class="section"><p class="eyebrow">CONVERSATION ACTIONS</p><div class="actions">
     ${i.state==="draft"?event("Record as sent","sent","primary"):""}
-    ${waiting?event("Reply received","replied","primary")+event("Checked, no reply","checked")+event("Snooze 3 days","snoozed")+event("Undo sent","undo_send"):""}
+    ${waiting?event("Reply received","replied","primary")+event("Checked, no reply","checked")+event("Snooze 3 days","snoozed")+(i.gmail_sent?"":event("Undo sent","undo_send")):""}
     ${["waiting","replied"].includes(i.state)?event("Referral offered","offered"):""}
     ${["waiting","replied","offered"].includes(i.state)?event("Referral submitted","submitted"):""}
     ${!["closed","submitted"].includes(i.state)?event("Close conversation","closed"):""}</div>
@@ -429,6 +437,23 @@ async function eventAction(id,type) {
   if(S.page==="outreach") await render();
   else await refreshNextActions();
 }
+async function sendGmail(id,followUp=false) {
+  const title=$("#dialog-title"), item=S.item;
+  const data={text:$(followUp?"#follow-up-text":"#draft-text").value,account:S.info.mail.account,
+    recipient:followUp?item.mail_peer:item.email,expected_due_at:followUp?item.due_at:null};
+  let updated;
+  try { updated=await api(`/outreach/${id}/gmail/send`,"POST",data); }
+  catch(error) {
+    const current=await api(`/outreach/${id}`).catch(()=>null);
+    if(current?.gmail_send_pending&&modal.open&&title.isConnected) {S.item=current;showConversation();}
+    throw error;
+  }
+  if(modal.open&&title.isConnected) {S.item=updated;showConversation();}
+  await refreshState();
+  if(S.page==="outreach") await render();
+  else await refreshNextActions();
+  notice(updated.state==="replied"?"Gmail already has a reply from this contact.":"Sent via Gmail. Job Scout is tracking the thread.");
+}
 async function copy(text) {
   await navigator.clipboard.writeText(text);
   notice("Copied to clipboard.");
@@ -451,6 +476,8 @@ async function act(action,id) {
       notice("Review the rewrite before saving.");
     },
     "mail-connect":async()=>{location.href=(await api("/gmail/authorize","POST")).url;},
+    "mail-connect-send":async()=>{location.href=(await api("/gmail/authorize","POST",{send:true})).url;},
+    "gmail-send":()=>sendGmail(id),"gmail-follow-up":()=>sendGmail(id,true),
     "forget-brave":async()=>{await saveIntegration("brave","");},
     "forget-google":async()=>{await saveIntegration("google","");},
     "mail-disconnect":async()=>{await api("/gmail/disconnect","POST");await refreshState();await render();notice("Gmail disconnected.");},
@@ -531,7 +558,12 @@ document.addEventListener("submit",event=>{
         const item=await api(`/outreach/${id}/contact-handoff`,"PATCH",data);
         if(form.isConnected&&modal.open) {
           S.item=item;
-          $("#handoff-links").innerHTML=handoffLinks(item);
+          if(item.channel==="gmail"&&item.state==="draft") {
+            const draft=$("#draft-text").value, note=$("#event-note").value;
+            showConversation();
+            $("#draft-text").value=draft;
+            $("#event-note").value=note;
+          } else $("#handoff-links").innerHTML=handoffLinks(item);
         }
         notice("Contact handoff saved.");
         break;

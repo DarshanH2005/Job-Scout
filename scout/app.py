@@ -20,9 +20,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import credentials
 from .feeds import PROVIDERS, REGIONS, board_from_job_url, build_job, canonical_url, fetch_board, public_url
-from .gmail import Gmail
+from .gmail import Gmail, headers, incoming_reply
 from .research import find_people, rewrite
-from .store import Store, now
+from .store import OUTREACH_SELECT, Store, now
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT.parent / ".env")
@@ -92,6 +92,16 @@ class ThreadLink(BaseModel):
 
 class MailOptions(BaseModel):
     linkedin_hints: bool
+
+
+class MailAuthorization(BaseModel):
+    send: bool = False
+
+
+class GmailSend(DraftText):
+    account: str = Field(max_length=254)
+    recipient: str = Field(max_length=254)
+    expected_due_at: str | None = Field(default=None, max_length=40)
 
 
 class IntegrationInput(BaseModel):
@@ -237,6 +247,7 @@ def create_app(db_path=None, seed=True):
                 "search_from_env": bool(os.getenv("SCOUT_BRAVE_KEY")),
                 "rewrite_configured": bool(os.getenv("SCOUT_OPENAI_KEY") and os.getenv("SCOUT_OPENAI_MODEL")),
                 "mail": {"account": account, "configured": credentials.google_configured(),
+                         "send_enabled": bool(account and store.setting("gmail_send_enabled") == "1"),
                          "from_env": bool(os.getenv("SCOUT_GOOGLE_CLIENT_FILE")),
                          "checked_at": store.setting("gmail_checked_at"),
                          "issue": store.setting("gmail_issue"),
@@ -486,15 +497,24 @@ def create_app(db_path=None, seed=True):
                 fail("Conversation not found.", 404)
             stamp, action = now(), data.action
             previous = current["state"]
+            if current["gmail_send_pending"]:
+                expired = datetime.fromisoformat(current["gmail_send_pending"]) + timedelta(minutes=1) <= datetime.now(timezone.utc)
+                recovery = "sent" if previous == "draft" else "followed_up"
+                if not expired or action not in {recovery, "closed"}:
+                    fail("Check Gmail Sent to verify the delivery before changing this conversation.", 409)
             if action == "sent" and previous == "waiting":
                 return store.outreach(item_id)
             changes, message = {}, ""
+            if current["gmail_send_pending"]:
+                changes["gmail_send_pending"] = ""
             if action == "sent" and previous == "draft":
                 message = current["draft"] if data.message is None else data.message.strip()
                 if not message:
                     fail("Enter the request you sent.")
                 changes = dict(state="waiting", sent_at=stamp, due_at=after(5), draft=message)
             elif action == "undo_send" and previous == "waiting":
+                if current["gmail_sent"]:
+                    fail("Gmail has already sent this request.", 409)
                 changes = dict(state="draft", sent_at=None, due_at=None, thread_id=None, follow_up_draft="",
                                mail_account=None, mail_anchor=None, mail_peer=None)
             elif action in {"checked", "snoozed", "followed_up"} and previous == "waiting":
@@ -532,11 +552,94 @@ def create_app(db_path=None, seed=True):
             fail("The model could not rewrite this draft.", 502)
 
     @app.post("/api/gmail/authorize")
-    async def authorize():
+    async def authorize(data: MailAuthorization | None = None):
         try:
-            return {"url": gmail.auth_url()}
+            return {"url": gmail.auth_url(send=bool(data and data.send))}
         except ValueError as exc:
             fail(str(exc))
+
+    @app.post("/api/outreach/{item_id}/gmail/send")
+    async def send_gmail(item_id: int, data: GmailSend):
+        text = data.text.strip() or fail("Enter a message.")
+        follow_up = data.expected_due_at is not None
+        async with gmail.lock:
+            item = store.outreach(item_id) or fail("Conversation not found.", 404)
+            if item["channel"] != "gmail" or item["state"] != ("waiting" if follow_up else "draft"):
+                fail("This conversation is no longer ready to send.", 409)
+            if item["gmail_send_pending"]:
+                fail("A Gmail send is unconfirmed. Check Gmail Sent before recording it here.", 409)
+            thread_id = item["thread_id"] if follow_up else None
+            recipient = item["mail_peer"] if follow_up else item["email"]
+            if not recipient or recipient != data.recipient:
+                fail("Review the saved recipient before sending.", 409)
+            if follow_up and (not thread_id or item["due_at"] != data.expected_due_at
+                              or item["mail_account"] != data.account):
+                fail("Reopen the linked Gmail conversation and review its history.", 409)
+            try:
+                account, token = await gmail.token(send=True)
+                if account != data.account:
+                    fail("The connected Gmail account changed. Review the draft again.", 409)
+                subject = f"Referral request for {item['job_title']}"
+                if follow_up:
+                    messages = (await gmail.thread(token, thread_id)).get("messages", [])
+                    if any(incoming_reply(message, item["mail_anchor"], recipient) for message in messages):
+                        gmail.record_reply(item)
+                        return store.outreach(item_id)
+                    sent = [message for message in messages if "SENT" in message.get("labelIds", [])]
+                    previous = headers(max(sent, key=lambda message: int(message.get("internalDate", 0)))) if sent else {}
+                    reply_to, subject = previous.get("message-id"), previous.get("subject")
+                    if not reply_to or not subject:
+                        fail("Gmail did not return the headers needed to send within this thread.", 409)
+                message = gmail.message(account, recipient, subject, text)
+                if follow_up:
+                    message["In-Reply-To"] = reply_to
+                    message["References"] = " ".join(filter(None, (previous.get("references"), reply_to)))
+            except (ValueError, httpx.HTTPError, OSError, ImportError, RuntimeError) as exc:
+                fail(mail_failure(exc), 502)
+
+            started = datetime.now(timezone.utc)
+            stamp = started.isoformat(timespec="microseconds")
+            draft_field = "follow_up_draft" if follow_up else "draft"
+            with store.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(OUTREACH_SELECT + " WHERE o.id=?", (item_id,)).fetchone()
+                if any(current[key] != item[key] for key in ("state", "gmail_send_pending", "due_at", "email",
+                                                             "thread_id", "mail_peer", "mail_account", draft_field)):
+                    fail("This conversation changed. Reopen it before sending.", 409)
+                conn.execute(f"UPDATE outreach SET gmail_send_pending=?,{draft_field}=? WHERE id=?", (stamp, text, item_id))
+
+            try:
+                delivery = await gmail.send_message(token, message, thread_id)
+                delivered_thread = delivery.get("threadId", "")
+                if (not delivery.get("id") or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", delivered_thread)
+                        or (thread_id and delivered_thread != thread_id)):
+                    raise ValueError("Gmail did not confirm the expected thread.")
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if 400 <= status < 500 and status != 408:
+                    store.write("UPDATE outreach SET gmail_send_pending='' WHERE id=? AND gmail_send_pending=?", (item_id, stamp))
+                    fail("Gmail rejected the send. Check the recipient and Gmail sending permission before trying again.", 502)
+                fail("Gmail did not confirm delivery. Check Gmail Sent before recording it here.", 502)
+            except (httpx.RequestError, ValueError, TypeError, AttributeError):
+                fail("Gmail did not confirm delivery. Check Gmail Sent before recording it here.", 502)
+
+            with store.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute("SELECT id FROM outreach WHERE thread_id=? AND id<>?",
+                                        (delivered_thread, item_id)).fetchone()
+                if existing:
+                    fail("Gmail used a thread already tracked by another referral. Check Gmail Sent before recording it here.", 409)
+                if follow_up:
+                    conn.execute("""UPDATE outreach SET checked_at=?,due_at=?,follow_up_draft='',gmail_send_pending=''
+                        WHERE id=?""", (now(), after(5), item_id))
+                else:
+                    conn.execute("""UPDATE outreach SET state='waiting',sent_at=?,due_at=?,thread_id=?,mail_account=?,
+                        mail_anchor=?,mail_peer=?,gmail_send_pending='',gmail_sent=1 WHERE id=?""",
+                        (now(), after(5), delivered_thread, account, int(started.timestamp() * 1000) - 1,
+                         recipient.lower(), item_id))
+                conn.execute("INSERT INTO events(outreach_id,kind,at,note,message) VALUES(?,?,?,?,?)",
+                             (item_id, "followed_up" if follow_up else "sent", now(), "Sent via Gmail.", text))
+            return store.outreach(item_id)
 
     @app.get("/oauth/google")
     async def oauth(state: str = "", code: str = "", error: str = ""):

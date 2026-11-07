@@ -1,4 +1,4 @@
-"""Opt-in Gmail metadata access. Google credentials stay on this machine."""
+"""Opt-in Gmail sending and reply checks. Credentials stay on this machine."""
 
 import asyncio
 import base64
@@ -7,6 +7,9 @@ import json
 import re
 import secrets
 import time
+from email.headerregistry import Address
+from email.message import EmailMessage
+from email.policy import SMTP
 from email.utils import getaddresses, parseaddr
 from urllib.parse import urlencode
 
@@ -16,11 +19,13 @@ from .store import now
 from .credentials import google_client
 
 SCOPE = "https://www.googleapis.com/auth/gmail.metadata"
+SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 API = "https://gmail.googleapis.com/gmail/v1/users/me"
 TOKEN = "https://oauth2.googleapis.com/token"
 REDIRECT = "http://127.0.0.1:8765/oauth/google"
 KEYRING_SERVICE = "Job Scout Gmail"
-HEADERS = ["From", "To", "Subject", "Auto-Submitted", "Precedence", "Content-Type", "In-Reply-To"]
+HEADERS = ["From", "To", "Subject", "Auto-Submitted", "Precedence", "Content-Type", "In-Reply-To",
+           "Message-ID", "References"]
 
 
 def headers(message):
@@ -46,13 +51,14 @@ class Gmail:
         self.pending = None
         self.lock = asyncio.Lock()
 
-    def auth_url(self):
+    def auth_url(self, send=False):
         config = google_client()
         state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
-        self.pending = (state, verifier, time.monotonic() + 600)
+        scopes = (SCOPE, SEND_SCOPE) if send else (SCOPE,)
+        self.pending = (state, verifier, time.monotonic() + 600, scopes)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
         return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(
-            dict(client_id=config["client_id"], response_type="code", scope=SCOPE, redirect_uri=REDIRECT,
+            dict(client_id=config["client_id"], response_type="code", scope=" ".join(scopes), redirect_uri=REDIRECT,
                  state=state, code_challenge=challenge, code_challenge_method="S256", access_type="offline", prompt="consent"))
 
     @staticmethod
@@ -77,15 +83,17 @@ class Gmail:
             raise ValueError("The Google authorization request expired. Start again from Settings.")
         token = await self._exchange(dict(code=code, grant_type="authorization_code",
                                           redirect_uri=REDIRECT, code_verifier=pending[1]))
-        if not token.get("refresh_token") or SCOPE not in token.get("scope", SCOPE).split():
+        token.setdefault("scope", " ".join(pending[3]))
+        if not token.get("refresh_token") or SCOPE not in token["scope"].split():
             raise ValueError("Google did not grant persistent Gmail metadata access.")
         profile = await self._get("/profile", token["access_token"])
         account = profile["emailAddress"]
         self._save(account, token)
         self.store.set_setting("gmail_account", account)
+        self.store.set_setting("gmail_send_enabled", "1" if SEND_SCOPE in token["scope"].split() else "")
         self.store.set_setting("gmail_issue", "")
 
-    async def token(self):
+    async def token(self, send=False):
         account = self.store.setting("gmail_account")
         if not account:
             raise ValueError("Connect Gmail in Settings first.")
@@ -97,6 +105,8 @@ class Gmail:
             refreshed = await self._exchange(dict(refresh_token=token["refresh_token"], grant_type="refresh_token"))
             token.update(refreshed)
             self._save(account, token)
+        if send and SEND_SCOPE not in token.get("scope", "").split():
+            raise ValueError("Enable Gmail sending in Job Scout Settings first.")
         return account, token["access_token"]
 
     def disconnect(self):
@@ -106,6 +116,30 @@ class Gmail:
             if vault.get_password(KEYRING_SERVICE, account):
                 vault.delete_password(KEYRING_SERVICE, account)
             self.store.set_setting("gmail_account", "")
+            self.store.set_setting("gmail_send_enabled", "")
+
+    @staticmethod
+    def message(account, recipient, subject, text):
+        message = EmailMessage(policy=SMTP)
+        try:
+            message["From"] = Address(addr_spec=account)
+            message["To"] = Address(addr_spec=recipient)
+        except ValueError as exc:
+            raise ValueError("Save a valid Gmail recipient before sending.") from exc
+        message["Subject"] = " ".join(subject.split())
+        message.set_content(text)
+        return message
+
+    @staticmethod
+    async def send_message(token, message, thread_id=None):
+        data = {"raw": base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")}
+        if thread_id:
+            data["threadId"] = thread_id
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.post(API + "/messages/send", json=data,
+                                         headers={"Authorization": f"Bearer {token}"})
+            response.raise_for_status()
+        return response.json()
 
     @staticmethod
     async def _get(path, token, params=None):
@@ -121,6 +155,17 @@ class Gmail:
     async def thread(self, token, thread_id):
         return await self._get(f"/threads/{thread_id}", token,
                                [("format", "metadata"), *(("metadataHeaders", h) for h in HEADERS)])
+
+    def record_reply(self, item):
+        with self.store.connect() as conn:
+            stamp = now()
+            update = conn.execute("""UPDATE outreach SET state='replied',due_at=NULL,checked_at=?
+                WHERE id=? AND state='waiting' AND thread_id=? AND gmail_send_pending=''""",
+                (stamp, item["id"], item["thread_id"]))
+            if update.rowcount:
+                conn.execute("INSERT INTO events(outreach_id,kind,at,note) VALUES(?,?,?,?)",
+                             (item["id"], "reply_detected", stamp, "Gmail reply from the linked recipient."))
+            return update.rowcount
 
     async def list_threads(self):
         _, token = await self.token()
@@ -157,7 +202,7 @@ class Gmail:
             raise ValueError("Link a conversation with one recipient.")
         with self.store.connect() as conn:
             changed = conn.execute("""UPDATE outreach SET thread_id=?,mail_account=?,mail_anchor=?,mail_peer=?
-                WHERE id=? AND channel='gmail' AND state='waiting'""",
+                WHERE id=? AND channel='gmail' AND state='waiting' AND gmail_send_pending='' AND gmail_sent=0""",
                 (thread_id, account, int(last["internalDate"]), recipients[0], item_id))
             if not changed.rowcount:
                 raise ValueError("Record the Gmail send before linking a conversation.")
@@ -179,15 +224,7 @@ class Gmail:
                 reply = next((message for message in thread.get("messages", [])
                               if incoming_reply(message, item["mail_anchor"], item["mail_peer"])), None)
                 if reply:
-                    with self.store.connect() as conn:
-                        stamp = now()
-                        update = conn.execute("""UPDATE outreach SET state='replied',due_at=NULL,checked_at=?
-                                                  WHERE id=? AND state='waiting' AND thread_id=?""",
-                                              (stamp, item["id"], item["thread_id"]))
-                        if update.rowcount:
-                            conn.execute("INSERT INTO events(outreach_id,kind,at,note) VALUES(?,?,?,?)",
-                                         (item["id"], "reply_detected", stamp, "Gmail reply from the linked recipient."))
-                            replies += 1
+                    replies += self.record_reply(item)
             if self.store.setting("linkedin_hints") == "1":
                 await self._linkedin_hints(account, token)
             self.store.set_setting("gmail_checked_at", now())

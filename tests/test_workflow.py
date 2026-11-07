@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 import scout.app as app_module
 from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, normalize
-from scout.gmail import Gmail, incoming_reply
+from scout.gmail import Gmail, SEND_SCOPE, SCOPE, incoming_reply
 from scout.research import public_candidates
 from scout.store import Store
 
@@ -62,6 +62,87 @@ def create_draft(client, job, channel="linkedin"):
 
 def action(client, item, name):
     return result(client.post(f"/api/outreach/{item['id']}/events", json={"action": name}))
+
+
+def test_gmail_direct_send_and_follow_up_track_the_original_thread(desk, monkeypatch):
+    client, _ = desk
+    item = create_draft(client, saved_job(client), "gmail")
+    path = f"/api/outreach/{item['id']}"
+    result(client.patch(path + "/contact-handoff", json={"email": "Jane@example.com"}))
+    sent = []
+    thread_messages = [{"labelIds": ["SENT"], "internalDate": "1", "payload": {"headers": [
+        {"name": "Subject", "value": "Referral request for Junior Data Engineer"},
+        {"name": "Message-ID", "value": "<first@example.com>"},
+    ]}}]
+
+    async def token(self, send=False):
+        return "me@example.com", "fake-token"
+
+    async def thread(self, token, thread_id):
+        assert thread_id == "example-thread"
+        return {"messages": thread_messages}
+
+    async def send(token, message, thread_id=None):
+        assert token == "fake-token"
+        sent.append((thread_id, message))
+        return {"threadId": "example-thread", "id": f"sent-{len(sent)}"}
+
+    monkeypatch.setattr(Gmail, "token", token)
+    monkeypatch.setattr(Gmail, "thread", thread)
+    monkeypatch.setattr(Gmail, "send_message", staticmethod(send))
+    request = {"account": "me@example.com", "recipient": "Jane@example.com", "text": "Hi Jane, may I ask for a referral?"}
+    result(client.post(path + "/gmail/send", json={**request, "recipient": "different@example.com"}), 409)
+    item = result(client.post(path + "/gmail/send", json=request))
+    assert (item["state"], item["thread_id"], item["mail_peer"]) == ("waiting", "example-thread", "jane@example.com")
+    assert item["events"][0]["message"] == request["text"]
+    assert sent[0][1]["To"] == "Jane@example.com"
+    assert sent[0][1].get_content().strip() == request["text"]
+    result(client.post(path + "/gmail/send", json=request), 409)
+    follow_up = {**request, "recipient": "jane@example.com", "expected_due_at": item["due_at"], "text": "Following up."}
+    item = result(client.post(path + "/gmail/send", json=follow_up))
+    assert sent[1][0] == "example-thread" and sent[1][1]["In-Reply-To"] == "<first@example.com>"
+    assert item["events"][0]["kind"] == "followed_up"
+    result(client.post(path + "/gmail/send", json=follow_up), 409)
+    thread_messages.append({"internalDate": str(item["mail_anchor"] + 1), "payload": {"headers": [
+        {"name": "From", "value": "Jane <jane@example.com>"},
+    ]}})
+    replied = result(client.post(path + "/gmail/send", json={**follow_up, "expected_due_at": item["due_at"]}))
+    assert replied["state"] == "replied" and replied["due_at"] is None and len(sent) == 2
+
+
+def test_gmail_unknown_delivery_cannot_be_retried(desk, monkeypatch):
+    client, store = desk
+    item = create_draft(client, saved_job(client), "gmail")
+    path = f"/api/outreach/{item['id']}"
+    result(client.patch(path + "/contact-handoff", json={"email": "jane@example.com"}))
+    attempts = []
+
+    async def token(self, send=False):
+        return "me@example.com", "fake-token"
+
+    async def timeout(*args):
+        attempts.append(args)
+        raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(Gmail, "token", token)
+    monkeypatch.setattr(Gmail, "send_message", staticmethod(timeout))
+    request = {"account": "me@example.com", "recipient": "jane@example.com", "text": "Referral request"}
+    result(client.post(path + "/gmail/send", json=request), 502)
+    store.initialize(seed=False)
+    item = result(client.get(path))
+    assert item["state"] == "draft" and item["gmail_send_pending"] and item["events"] == []
+    result(client.post(path + "/gmail/send", json=request), 409)
+    assert len(attempts) == 1
+
+
+def test_gmail_sending_scope_is_opt_in(desk, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    client, _ = desk
+    monkeypatch.setattr("scout.gmail.google_client", lambda: {"client_id": "test"})
+    for send, scopes in [(False, [SCOPE]), (True, [SCOPE, SEND_SCOPE])]:
+        url = result(client.post("/api/gmail/authorize", json={"send": send}))["url"]
+        assert parse_qs(urlsplit(url).query)["scope"][0].split() == scopes
 
 
 def test_new_jobs_failure_recovery_and_source_coverage(desk, monkeypatch):
