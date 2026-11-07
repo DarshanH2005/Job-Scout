@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f6f7f3">
+  <meta name="description" content="Your private employer watchlist and referral inbox.">
+  <title>Job Scout · Career desk</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="shell top-inner">
+      <a href="#jobs" class="brand" aria-label="Job Scout home">
+        <span class="brand-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="7.5"/><circle cx="12" cy="12" r="3.5"/><path d="M12 12 20 4"/><circle cx="12" cy="12" r="1"/></svg></span>
+        <span>Job Scout <small>CAREER DESK</small></span>
+      </a>
+      <nav aria-label="Workspace">
+        <a href="#jobs">Job feed</a><a href="#saved">Saved</a><a href="#outreach">Referrals <span id="nav-due" hidden></span></a><a href="#watchlist">Watchlist</a><a href="#settings">Settings</a>
+      </nav>
+      <div class="top-tools"><span class="local"><i></i> Local workspace</span><button class="button small" type="button" data-action="command">Commands <kbd>Ctrl K</kbd></button></div>
+    </div>
+  </header>
+  <main id="main" class="shell" tabindex="-1">
+    <section class="hero" id="hero" aria-labelledby="hero-title">
+      <svg class="radar" viewBox="0 0 520 265" fill="none" aria-hidden="true">
+        <defs><linearGradient id="beam" x1="0" x2="1" y1="1" y2="0"><stop stop-color="#9cdd80" stop-opacity=".03"/><stop offset="1" stop-color="#a1e582" stop-opacity=".38"/></linearGradient></defs>
+        <g stroke="#a8d4a2" stroke-opacity=".27"><circle cx="345" cy="150" r="44"/><circle cx="345" cy="150" r="79"/><circle cx="345" cy="150" r="115"/><circle cx="345" cy="150" r="151"/><circle cx="345" cy="150" r="187"/><path d="M148 150h372M345 0v265M198 265 478 0M205 10l255 255"/></g>
+        <path fill="url(#beam)" d="M345 150 357 0h161Z"/><path stroke="#adf089" stroke-opacity=".65" d="M345 150 518 0"/><g fill="#c8f49c"><circle cx="345" cy="150" r="4"/><circle cx="397" cy="92" r="3.5"/><circle cx="441" cy="90" r="4"/><circle cx="288" cy="198" r="2.5"/><circle cx="255" cy="134" r="2.5"/></g>
+        <g stroke="#c8f49c" stroke-opacity=".6"><path d="M441 83v14m-7-7h14m-51-4v12m-6-6h12"/></g>
+      </svg>
+      <div class="hero-content">
+        <p class="eyebrow hero-eyebrow"><span></span> EMPLOYER CAREER FEEDS</p>
+        <h1 id="hero-title">Find your next opening.</h1>
+        <p>Scan employer career sites for fresh roles and turn the ones you like into referral conversations.</p>
+        <div class="hero-actions"><button class="button scan-button" id="scan-button"><span aria-hidden="true">↻</span> Find latest jobs</button><button class="button hero-secondary" data-action="import">＋ Add a job link</button></div>
+        <div id="scan-progress" class="scan-progress" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+    <div id="content" class="content" aria-busy="true"><div class="panel loading">Loading your workspace…</div></div>
+  </main>
+  <dialog id="dialog" aria-labelledby="dialog-title"><div id="dialog-content"></div></dialog>
+  <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+  <footer class="shell footer"><span>JOB SCOUT</span><span>Your shortlist and conversations stay on this computer.</span></footer>
+</body>
+</html>

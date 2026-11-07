@@ -1,0 +1,212 @@
+"""Opt-in Gmail metadata access. Google credentials stay on this machine."""
+
+import asyncio
+import base64
+import hashlib
+import json
+import re
+import secrets
+import time
+from email.utils import getaddresses, parseaddr
+from urllib.parse import urlencode
+
+import httpx
+
+from .store import now
+from .credentials import google_client
+
+SCOPE = "https://www.googleapis.com/auth/gmail.metadata"
+API = "https://gmail.googleapis.com/gmail/v1/users/me"
+TOKEN = "https://oauth2.googleapis.com/token"
+REDIRECT = "http://127.0.0.1:8765/oauth/google"
+KEYRING_SERVICE = "Job Scout Gmail"
+HEADERS = ["From", "To", "Subject", "Auto-Submitted", "Precedence", "Content-Type", "In-Reply-To"]
+
+
+def headers(message):
+    return {item["name"].lower(): item["value"] for item in message.get("payload", {}).get("headers", [])}
+
+
+def incoming_reply(message, anchor, peer):
+    if "SENT" in message.get("labelIds", []) or int(message.get("internalDate", 0)) <= anchor:
+        return False
+    data = headers(message)
+    address = parseaddr(data.get("from", ""))[1].lower()
+    subject = data.get("subject", "")
+    return (bool(address) and address == peer
+            and not re.search(r"\b(?:automatic reply|out of office|delivery status notification|undeliverable)\b", subject, re.I)
+            and data.get("auto-submitted", "no").lower() == "no"
+            and data.get("precedence", "").lower() not in {"bulk", "list", "junk"}
+            and "delivery-status" not in data.get("content-type", "").lower())
+
+
+class Gmail:
+    def __init__(self, store):
+        self.store = store
+        self.pending = None
+        self.lock = asyncio.Lock()
+
+    def auth_url(self):
+        config = google_client()
+        state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
+        self.pending = (state, verifier, time.monotonic() + 600)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+        return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(
+            dict(client_id=config["client_id"], response_type="code", scope=SCOPE, redirect_uri=REDIRECT,
+                 state=state, code_challenge=challenge, code_challenge_method="S256", access_type="offline", prompt="consent"))
+
+    @staticmethod
+    def _vault():
+        import keyring
+        return keyring
+
+    def _save(self, account, token):
+        self._vault().set_password(KEYRING_SERVICE, account, json.dumps(token))
+
+    async def _exchange(self, data):
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.post(TOKEN, data={**google_client(), **data})
+            response.raise_for_status()
+        result = response.json()
+        result["expires_at"] = time.time() + result.get("expires_in", 3600) - 60
+        return result
+
+    async def connect(self, state, code):
+        pending, self.pending = self.pending, None
+        if not pending or not secrets.compare_digest(state, pending[0]) or time.monotonic() > pending[2]:
+            raise ValueError("The Google authorization request expired. Start again from Settings.")
+        token = await self._exchange(dict(code=code, grant_type="authorization_code",
+                                          redirect_uri=REDIRECT, code_verifier=pending[1]))
+        if not token.get("refresh_token") or SCOPE not in token.get("scope", SCOPE).split():
+            raise ValueError("Google did not grant persistent Gmail metadata access.")
+        profile = await self._get("/profile", token["access_token"])
+        account = profile["emailAddress"]
+        self._save(account, token)
+        self.store.set_setting("gmail_account", account)
+        self.store.set_setting("gmail_issue", "")
+
+    async def token(self):
+        account = self.store.setting("gmail_account")
+        if not account:
+            raise ValueError("Connect Gmail in Settings first.")
+        value = self._vault().get_password(KEYRING_SERVICE, account)
+        if not value:
+            raise ValueError("Reconnect Gmail in Settings.")
+        token = json.loads(value)
+        if token["expires_at"] <= time.time():
+            refreshed = await self._exchange(dict(refresh_token=token["refresh_token"], grant_type="refresh_token"))
+            token.update(refreshed)
+            self._save(account, token)
+        return account, token["access_token"]
+
+    def disconnect(self):
+        account = self.store.setting("gmail_account")
+        if account:
+            vault = self._vault()
+            if vault.get_password(KEYRING_SERVICE, account):
+                vault.delete_password(KEYRING_SERVICE, account)
+            self.store.set_setting("gmail_account", "")
+
+    @staticmethod
+    async def _get(path, token, params=None):
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.get(API + path, headers={"Authorization": f"Bearer {token}"}, params=params)
+            response.raise_for_status()
+        return response.json()
+
+    async def _label(self, token, name):
+        data = await self._get("/labels", token)
+        return next((label["id"] for label in data.get("labels", []) if label["name"] == name), None)
+
+    async def thread(self, token, thread_id):
+        return await self._get(f"/threads/{thread_id}", token,
+                               [("format", "metadata"), *(("metadataHeaders", h) for h in HEADERS)])
+
+    async def list_threads(self):
+        _, token = await self.token()
+        label = await self._label(token, "Job Scout")
+        if not label:
+            return []
+        data = await self._get("/threads", token, {"labelIds": label, "maxResults": 15})
+        semaphore = asyncio.Semaphore(4)
+
+        async def describe(row):
+            async with semaphore:
+                thread = await self.thread(token, row["id"])
+                sent = [message for message in thread.get("messages", []) if "SENT" in message.get("labelIds", [])]
+                if not sent:
+                    return None
+                last = max(sent, key=lambda message: int(message.get("internalDate", 0)))
+                data = headers(last)
+                return {"id": row["id"], "subject": data.get("subject", "Untitled"), "to": data.get("to", "")}
+        return [item for item in await asyncio.gather(*(describe(row) for row in data.get("threads", []))) if item]
+
+    async def link(self, item_id, thread_id):
+        account, token = await self.token()
+        label = await self._label(token, "Job Scout")
+        thread = await self.thread(token, thread_id)
+        messages = thread.get("messages", [])
+        if not label or not any(label in message.get("labelIds", []) for message in messages):
+            raise ValueError("Apply the Job Scout label in Gmail before linking the thread.")
+        outgoing = [message for message in messages if "SENT" in message.get("labelIds", [])]
+        if not outgoing:
+            raise ValueError("Choose a Gmail conversation with a sent message.")
+        last = max(outgoing, key=lambda message: int(message.get("internalDate", 0)))
+        recipients = [address.lower() for _, address in getaddresses([headers(last).get("to", "")]) if address]
+        if len(recipients) != 1:
+            raise ValueError("Link a conversation with one recipient.")
+        with self.store.connect() as conn:
+            changed = conn.execute("""UPDATE outreach SET thread_id=?,mail_account=?,mail_anchor=?,mail_peer=?
+                WHERE id=? AND channel='gmail' AND state='waiting'""",
+                (thread_id, account, int(last["internalDate"]), recipients[0], item_id))
+            if not changed.rowcount:
+                raise ValueError("Record the Gmail send before linking a conversation.")
+
+    async def check(self):
+        async with self.lock:
+            account, token = await self.token()
+            items = self.store.all("""SELECT id,thread_id,mail_anchor,mail_peer FROM outreach
+                WHERE mail_account=? AND thread_id IS NOT NULL AND state='waiting'""", (account,))
+            replies, issues = 0, 0
+            for item in items:
+                try:
+                    thread = await self.thread(token, item["thread_id"])
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 404:
+                        raise
+                    issues += 1
+                    continue
+                reply = next((message for message in thread.get("messages", [])
+                              if incoming_reply(message, item["mail_anchor"], item["mail_peer"])), None)
+                if reply:
+                    with self.store.connect() as conn:
+                        stamp = now()
+                        update = conn.execute("""UPDATE outreach SET state='replied',due_at=NULL,checked_at=?
+                                                  WHERE id=? AND state='waiting' AND thread_id=?""",
+                                              (stamp, item["id"], item["thread_id"]))
+                        if update.rowcount:
+                            conn.execute("INSERT INTO events(outreach_id,kind,at,note) VALUES(?,?,?,?)",
+                                         (item["id"], "reply_detected", stamp, "Gmail reply from the linked recipient."))
+                            replies += 1
+            if self.store.setting("linkedin_hints") == "1":
+                await self._linkedin_hints(account, token)
+            self.store.set_setting("gmail_checked_at", now())
+            self.store.set_setting("gmail_issue", f"{issues} linked Gmail threads could not be read." if issues else "")
+            return replies
+
+    async def _linkedin_hints(self, account, token):
+        label = await self._label(token, "Job Scout LinkedIn")
+        if not label:
+            return
+        data = await self._get("/messages", token, {"labelIds": label, "maxResults": 25})
+        for row in data.get("messages", []):
+            if self.store.one("SELECT 1 FROM mail_seen WHERE account=? AND id=?", (account, row["id"])):
+                continue
+            message = await self._get(f'/messages/{row["id"]}', token,
+                                      [("format", "metadata"), ("metadataHeaders", "From"), ("metadataHeaders", "Subject")])
+            info = headers(message)
+            sender = parseaddr(info.get("from", ""))[1].lower().rpartition("@")[2]
+            subject = info.get("subject", "")[:180]
+            if (sender == "linkedin.com" or sender.endswith(".linkedin.com")) and re.search(r"\b(message|replied|inmail)\b", subject, re.I):
+                self.store.write("INSERT OR IGNORE INTO mail_seen(account,id,kind,at,subject) VALUES(?,?,?,?,?)",
+                                 (account, row["id"], "linkedin_hint", now(), subject))
