@@ -237,7 +237,9 @@ function showJob() {
   dialog(job.title,`${job.company} · ${regions[job.region]}`,`<div class="actions">
     ${L("Apply on company site",job.apply_url,"primary")}${B(job.saved?"Remove from saved":"Save job","save",job.id)}${B(job.applied_at?"Undo applied":"Mark applied","apply",job.id)}
     ${B(job.hidden?"Restore to job feed":"Hide from job feed","hide",job.id)}</div>
-    <p class="micro">${job.posted_at?`Employer posted ${date(job.posted_at)} · `:""}First seen ${date(job.first_seen)}${job.archived?" · No longer on feed":job.source_status==="failed"?" · Latest feed check failed":""}</p>
+    <div class="actions">${B("Check this posting","verify-job",job.id,"small")}
+      <span class="micro" id="listing-check-result" role="status"></span></div>
+    <p class="micro">${job.posted_at?`Employer posted ${date(job.posted_at)} · `:""}First seen ${date(job.first_seen)}${job.archived?" · Absent in recent scans":job.source_status==="failed"?" · Latest scan could not reach this feed":""}</p>
     ${job.evidence?`<div class="evidence"><strong>Location evidence</strong><br>${E(job.evidence)}</div>`:""}
     ${job.eligibility?.length?`<section class="evidence" aria-label="Eligibility evidence"><strong>Eligibility evidence</strong>
       <ul class="eligibility-list">${job.eligibility.map(item=>`<li>${tag(item.label)} <span>${E(item.text)}</span></li>`).join("")}</ul></section>`:""}
@@ -247,6 +249,21 @@ function showJob() {
     </div></section>`:""}
     ${job.description?`<details><summary>View job description</summary><div class="description">${E(job.description)}</div></details>`:""}
     <section class="section"><p class="eyebrow">REFERRAL RESEARCH</p><div class="actions">${B("Find people","find",job.id,"primary")}${B("Add someone I know","person")}</div><div id="people"></div></section>`);
+}
+async function verifyJob(id) {
+  const target=$("#listing-check-result");
+  target.textContent="Checking the employer feed…";
+  try {
+    const result=await api(`/jobs/${id}/verify`,"POST");
+    if(!target.isConnected) return;
+    const labels={listed:"Listed on employer feed",not_listed:"Missing from employer feed",unavailable:"Feed unavailable",manual:"Manual check needed"};
+    target.innerHTML=`${tag(labels[result.status],result.status==="listed"?"good":"warn")}
+      ${result.checked_at?` <span>Checked ${date(result.checked_at,true)}</span>`:""}
+      ${result.detail?` <span>${E(result.detail)}</span>`:""}`;
+  } catch(error) {
+    if(target.isConnected) target.textContent="Could not check the listing.";
+    throw error;
+  }
 }
 async function findPeople(id) {
   const target=$("#people");
@@ -379,7 +396,7 @@ async function act(action,id) {
     "toggle-hidden":()=>{S.hidden=!S.hidden;S.offset=0;return render();},
     save:()=>jobFlag(id,"save"),apply:()=>jobFlag(id,"apply"),hide:()=>jobFlag(id,"hide"),"job-back":showJob,find:()=>findPeople(id),
     person:()=>person(id===""?-1:Number(id)),conversation:()=>openConversation(id),
-    "job-conversation":()=>openConversation(id,S.job.id),
+    "job-conversation":()=>openConversation(id,S.job.id),"verify-job":()=>verifyJob(id),
     "copy-query":()=>copy(S.query),"copy-message":()=>copy($("#draft-text").value),
     "copy-follow-up":()=>copy($("#follow-up-text").value),
     rewrite:async()=>{

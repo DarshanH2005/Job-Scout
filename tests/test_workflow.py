@@ -441,3 +441,30 @@ def test_job_detail_quotes_required_and_preferred_eligibility(desk):
         {"label": "Required", "text": minimum}, {"label": "Preferred", "text": preferred},
     ]
     assert eligibility_evidence("Our company has 20 years of experience.") == []
+
+
+def test_verify_posting_distinguishes_presence_absence_and_feed_failure(desk, monkeypatch):
+    client, _ = desk
+    register(client)
+    rows, error, calls = [sample()], None, []
+
+    async def fetch(_client, company, _limit):
+        calls.append(company["board"])
+        return rows, error
+
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    full = scan(client)
+    listing = result(client.get("/api/jobs"))["items"][0]
+    path = f"/api/jobs/{listing['id']}"
+    original = result(client.patch(path, json={"saved": True, "applied": True}))
+    assert result(client.post(path + "/verify"))["status"] == "listed"
+    rows = []
+    assert result(client.post(path + "/verify"))["status"] == "not_listed"
+    error = "HTTP 503"
+    check = result(client.post(path + "/verify"))
+    assert check["status"] == "unavailable" and check["detail"] == error and check["checked_at"]
+    assert result(client.get(path)) == original
+    assert result(client.get("/api/state"))["full_scan"]["id"] == full["id"]
+    manual = saved_job(client)
+    assert result(client.post(f"/api/jobs/{manual['id']}/verify"))["status"] == "manual"
+    assert calls == ["sample"] * 4

@@ -320,6 +320,21 @@ def create_app(db_path=None, seed=True):
     async def job(job_id: int):
         return job_or_404(store, job_id)
 
+    @app.post("/api/jobs/{job_id}/verify")
+    async def verify_job(job_id: int):
+        saved = job_or_404(store, job_id)
+        company = store.one("SELECT * FROM companies WHERE id=?", (saved["company_id"],))
+        if saved["manual"] or company["provider"] not in PROVIDERS:
+            return {"status": "manual", "checked_at": None, "detail": "Open the posting to verify this manually added role."}
+        async with httpx.AsyncClient(timeout=12) as client:
+            postings, error = await fetch_board(client, company, asyncio.Semaphore(1))
+        stamp = now()
+        if error:
+            return {"status": "unavailable", "checked_at": stamp, "detail": error}
+        listed = any(posting["external_id"] == saved["external_id"] or posting["canonical_url"] == saved["canonical_url"]
+                     for posting in postings)
+        return {"status": "listed" if listed else "not_listed", "checked_at": stamp, "detail": ""}
+
     @app.post("/api/jobs", status_code=201)
     async def import_job(data: JobInput):
         url = required_url(data.url)
