@@ -46,13 +46,14 @@ CREATE TABLE IF NOT EXISTS contacts (
 CREATE TABLE IF NOT EXISTS outreach (
     id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id),
     contact_id INTEGER NOT NULL REFERENCES contacts(id), channel TEXT NOT NULL,
-    draft TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'draft', created_at TEXT NOT NULL,
+    draft TEXT NOT NULL, follow_up_draft TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'draft', created_at TEXT NOT NULL,
     sent_at TEXT, due_at TEXT, checked_at TEXT, thread_id TEXT UNIQUE, mail_account TEXT, mail_anchor INTEGER, mail_peer TEXT,
     UNIQUE(job_id, contact_id, channel)
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY, outreach_id INTEGER NOT NULL REFERENCES outreach(id),
-    kind TEXT NOT NULL, at TEXT NOT NULL, note TEXT NOT NULL DEFAULT ''
+    kind TEXT NOT NULL, at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS mail_seen (
     account TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL,
@@ -96,6 +97,11 @@ class Store:
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
+            conn.execute("BEGIN IMMEDIATE")
+            if not any(row["name"] == "follow_up_draft" for row in conn.execute("PRAGMA table_info(outreach)")):
+                conn.execute("ALTER TABLE outreach ADD COLUMN follow_up_draft TEXT NOT NULL DEFAULT ''")
+            if not any(row["name"] == "message" for row in conn.execute("PRAGMA table_info(events)")):
+                conn.execute("ALTER TABLE events ADD COLUMN message TEXT NOT NULL DEFAULT ''")
             conn.execute("UPDATE scans SET state='interrupted', finished_at=? WHERE state='running'", (now(),))
             if seed and not conn.execute("SELECT 1 FROM settings WHERE key='seeded'").fetchone():
                 with DATA.open(encoding="utf-8-sig", newline="") as handle:
@@ -223,12 +229,12 @@ class Store:
                            FROM jobs j JOIN companies c ON c.id=j.company_id WHERE j.id=?""", (job_id,))
 
     def inbox(self):
-        return self.all(OUTREACH_SELECT + " ORDER BY o.id DESC")
+        return self.all(OUTREACH_SELECT + " ORDER BY CASE WHEN o.state='waiting' THEN o.due_at END ASC NULLS LAST, o.id DESC")
 
     def outreach(self, item_id):
         row = self.one(OUTREACH_SELECT + " WHERE o.id=?", (item_id,))
         if row:
-            row["events"] = self.all("SELECT kind,at,note FROM events WHERE outreach_id=? ORDER BY id DESC", (item_id,))
+            row["events"] = self.all("SELECT kind,at,note,message FROM events WHERE outreach_id=? ORDER BY id DESC", (item_id,))
         return row
 
 

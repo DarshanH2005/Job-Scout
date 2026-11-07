@@ -270,3 +270,37 @@ def test_temporary_feed_retry_respects_delay(retry_after, expected):
     _, error = asyncio.run(read())
     assert len(requests) == expected
     assert (error is None) == (expected == 2)
+
+
+def test_follow_up_keeps_request_and_send_history(desk):
+    client, _ = desk
+    item = create_draft(client, saved_job(client))
+    path = f"/api/outreach/{item['id']}"
+    assert client.patch(path + "/follow-up", json={"text": "Too early."}).status_code == 409
+    original = "My edited request."
+    sent = result(client.post(path + "/events", json={"action": "sent", "message": original}))
+    draft = result(client.patch(path + "/follow-up", json={"text": "Thanks for taking a look."}))
+    assert draft["draft"] == original and draft["follow_up_draft"] == "Thanks for taking a look."
+    assert draft["due_at"] == sent["due_at"]
+    payload = {"action": "followed_up", "message": "My edited follow-up.", "expected_due_at": sent["due_at"]}
+    follow_up = result(client.post(path + "/events", json=payload))
+    assert follow_up["draft"] == original
+    assert follow_up["follow_up_draft"] == ""
+    assert follow_up["due_at"] > sent["due_at"]
+    assert [event["message"] for event in follow_up["events"]] == ["My edited follow-up.", original]
+    assert client.post(path + "/events", json=payload).status_code == 409
+    assert action(client, item, "replied")["due_at"] is None
+
+
+def test_follow_up_migration_keeps_existing_conversations(desk):
+    client, store = desk
+    item = action(client, create_draft(client, saved_job(client)), "sent")
+    with store.connect() as conn:
+        conn.execute("ALTER TABLE events DROP COLUMN message")
+        conn.execute("ALTER TABLE outreach DROP COLUMN follow_up_draft")
+    store.initialize(seed=False)
+    store.initialize(seed=False)
+    existing = store.outreach(item["id"])
+    assert existing["state"] == "waiting" and existing["draft"] == item["draft"]
+    assert existing["follow_up_draft"] == ""
+    assert existing["events"][0]["kind"] == "sent"

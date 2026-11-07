@@ -70,6 +70,8 @@ class DraftText(BaseModel):
 class OutreachEvent(BaseModel):
     action: str
     note: str = Field(default="", max_length=650)
+    message: str | None = Field(default=None, max_length=4000)
+    expected_due_at: str | None = Field(default=None, max_length=40)
 
 
 class ThreadLink(BaseModel):
@@ -386,6 +388,15 @@ def create_app(db_path=None, seed=True):
         store.write("UPDATE outreach SET draft=? WHERE id=?", (data.text.strip() or fail("Enter a message."), item_id))
         return store.outreach(item_id)
 
+    @app.patch("/api/outreach/{item_id}/follow-up")
+    async def save_follow_up(item_id: int, data: DraftText):
+        text = data.text.strip() or fail("Enter a follow-up message.")
+        with store.connect() as conn:
+            change = conn.execute("UPDATE outreach SET follow_up_draft=? WHERE id=? AND state='waiting'", (text, item_id))
+            if not change.rowcount:
+                fail("Follow-ups are available while waiting for a reply.", 409)
+        return store.outreach(item_id)
+
     @app.post("/api/outreach/{item_id}/events")
     async def event(item_id: int, data: OutreachEvent):
         with store.connect() as conn:
@@ -397,16 +408,26 @@ def create_app(db_path=None, seed=True):
             previous = current["state"]
             if action == "sent" and previous == "waiting":
                 return store.outreach(item_id)
-            changes = {}
+            changes, message = {}, ""
             if action == "sent" and previous == "draft":
-                changes = dict(state="waiting", sent_at=stamp, due_at=after(5))
+                message = current["draft"] if data.message is None else data.message.strip()
+                if not message:
+                    fail("Enter the request you sent.")
+                changes = dict(state="waiting", sent_at=stamp, due_at=after(5), draft=message)
             elif action == "undo_send" and previous == "waiting":
-                changes = dict(state="draft", sent_at=None, due_at=None, thread_id=None,
+                changes = dict(state="draft", sent_at=None, due_at=None, thread_id=None, follow_up_draft="",
                                mail_account=None, mail_anchor=None, mail_peer=None)
             elif action in {"checked", "snoozed", "followed_up"} and previous == "waiting":
                 changes = dict(due_at=after(5 if action == "followed_up" else 3))
                 if action != "snoozed":
                     changes["checked_at"] = stamp
+                if action == "followed_up":
+                    if data.expected_due_at is not None and data.expected_due_at != current["due_at"]:
+                        fail("The next check date changed. Reopen the conversation and review its history.", 409)
+                    message = current["follow_up_draft"] if data.message is None else data.message.strip()
+                    if data.message is not None and not message:
+                        fail("Enter the follow-up you sent.")
+                    changes["follow_up_draft"] = ""
             elif action == "replied" and previous in {"waiting", "replied"}:
                 changes = dict(state="replied", due_at=None, checked_at=stamp)
             elif action in {"offered", "submitted"} and previous in {"waiting", "replied", "offered"}:
@@ -417,8 +438,8 @@ def create_app(db_path=None, seed=True):
                 fail("That action does not apply to this conversation.", 409)
             assignments = ",".join(f"{key}=?" for key in changes)
             conn.execute(f"UPDATE outreach SET {assignments} WHERE id=?", (*changes.values(), item_id))
-            conn.execute("INSERT INTO events(outreach_id,kind,at,note) VALUES(?,?,?,?)",
-                         (item_id, action, stamp, data.note.strip()))
+            conn.execute("INSERT INTO events(outreach_id,kind,at,note,message) VALUES(?,?,?,?,?)",
+                         (item_id, action, stamp, data.note.strip(), message))
         return store.outreach(item_id)
 
     @app.post("/api/rewrite")

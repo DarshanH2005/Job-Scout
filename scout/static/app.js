@@ -142,10 +142,10 @@ function inboxRow(item) {
 async function inbox() {
   const {items,hints}=await api("/outreach"), now=new Date();
   const groups=[
-    ["Ready to send",items.filter(i=>i.state==="draft")],
     ["Check for replies",items.filter(i=>i.state==="waiting"&&new Date(i.due_at)<=now)],
-    ["Waiting",items.filter(i=>i.state==="waiting"&&new Date(i.due_at)>now)],
     ["Needs your action",items.filter(i=>["replied","offered"].includes(i.state))],
+    ["Ready to send",items.filter(i=>i.state==="draft")],
+    ["Waiting",items.filter(i=>i.state==="waiting"&&new Date(i.due_at)>now)],
     ["Completed",items.filter(i=>["submitted","closed"].includes(i.state))],
   ];
   return `${head("Referral inbox","See who you contacted and which conversations need attention.",S.info.mail.account?B("Check Gmail","mail-check","","primary"):'<a class="button" href="#settings">Set up Gmail</a>')}
@@ -257,21 +257,34 @@ function person(index) {
     <div class="actions"><button class="button primary">Prepare draft</button>${B("Back to job","job-back")}</div></form>`);
 }
 async function openConversation(id) { S.item=await api(`/outreach/${id}`); showConversation(); }
+function followUpText(item) {
+  const first = item.person.split(/\s+/)[0];
+  return `Hi ${first}, I wanted to follow up on my referral request for the ${item.job_title} role at ${item.company}. If you’re able to point me in the right direction, I’d appreciate it.\n\nThanks again!`;
+}
 function showConversation() {
   const i=S.item, waiting=i.state==="waiting";
+  const original = i.events.find(e=>e.kind==="sent"&&e.message)?.message || i.draft;
   const event=(label,action,style="small")=>B(label,`event-${action}`,i.id,style);
   dialog(i.person,`${i.company} · ${channels[i.channel]} · ${stages[i.state]}`,`<p class="micro">${E(i.job_title)}${i.due_at?` · Next check ${date(i.due_at)}`:""}</p>
-    <form class="form" data-form="message" data-id="${i.id}"><label>Editable message<textarea id="draft-text" name="text" maxlength="4000" required>${E(i.draft)}</textarea></label>
-    <div class="actions">${B("Copy message","copy-message","","primary")}<button class="button">Save edits</button>${S.info.rewrite_configured?B("AI rewrite","rewrite"):""}${i.source?L("Open contact",i.source):""}</div></form>
+    ${i.state==="draft"?`<form class="form" data-form="message" data-id="${i.id}"><label>Editable message<textarea id="draft-text" name="text" maxlength="4000" required>${E(i.draft)}</textarea></label>
+    <div class="actions">${B("Copy message","copy-message","","primary")}<button class="button">Save edits</button>${S.info.rewrite_configured?B("AI rewrite","rewrite"):""}${i.source?L("Open contact",i.source):""}</div></form>`:
+    `<details><summary>Original request</summary><div class="description">${E(original)}</div>${!waiting&&i.source?L("Open contact",i.source):""}</details>`}
+    ${waiting?`<section class="section"><p class="eyebrow">FOLLOW-UP</p>
+    <form class="form" data-form="follow-up" data-id="${i.id}">
+      <label>Follow-up draft<textarea id="follow-up-text" name="text" maxlength="4000" required>${E(i.follow_up_draft || followUpText(i))}</textarea></label>
+      <p class="hint">Send it in the original conversation, then record the send here.</p>
+      <div class="actions">${B("Copy follow-up","copy-follow-up","","primary")}<button class="button">Save draft</button>${i.source?L("Open contact",i.source):""}
+      ${event("Record follow-up sent","followed_up","")}</div>
+    </form></section>`:""}
     <section class="section"><p class="eyebrow">CONVERSATION ACTIONS</p><div class="actions">
     ${i.state==="draft"?event("Record as sent","sent","primary"):""}
-    ${waiting?event("Reply received","replied","primary")+event("Checked, no reply","checked")+event("Snooze 3 days","snoozed")+event("Follow-up sent","followed_up")+event("Undo sent","undo_send"):""}
+    ${waiting?event("Reply received","replied","primary")+event("Checked, no reply","checked")+event("Snooze 3 days","snoozed")+event("Undo sent","undo_send"):""}
     ${["waiting","replied"].includes(i.state)?event("Referral offered","offered"):""}
     ${["waiting","replied","offered"].includes(i.state)?event("Referral submitted","submitted"):""}
     ${!["closed","submitted"].includes(i.state)?event("Close conversation","closed"):""}</div>
     <div id="gmail-link">${i.channel==="gmail"&&waiting&&S.info.mail.account?(i.thread_id?'<p class="hint">Gmail thread linked.</p>':B("Link Gmail thread","mail-threads",i.id)):""}</div>
     <label class="form">Optional event note<input id="event-note" maxlength="650" placeholder="What did they say or what’s next?"></label></section>
-    <section><p class="eyebrow">HISTORY</p><ul class="timeline">${i.events.length?i.events.map(e=>`<li><strong>${E(historyLabels[e.kind]||e.kind)}</strong> · ${date(e.at,true)}${e.note?`<br>${E(e.note)}`:""}</li>`).join(""):"<li>Conversation prepared. Sending is recorded separately.</li>"}</ul></section>`);
+    <section><p class="eyebrow">HISTORY</p><ul class="timeline">${i.events.length?i.events.map(e=>`<li><strong>${E(historyLabels[e.kind]||e.kind)}</strong> · ${date(e.at,true)}${e.note?`<br>${E(e.note)}`:""}${e.kind==="followed_up"&&e.message?`<details><summary>View sent follow-up</summary><div class="description">${E(e.message)}</div></details>`:""}</li>`).join(""):"<li>Conversation prepared. Sending is recorded separately.</li>"}</ul></section>`);
 }
 async function mailThreads(id) {
   const target=$("#gmail-link"), rows=await api("/gmail/threads");
@@ -287,10 +300,14 @@ async function jobFlag(id,kind) {
   showJob(); await refreshJobs();
 }
 async function eventAction(id,type) {
-  const field=$("#draft-text"), text=field.value.trim(), note=$("#event-note").value;
-  if(type==="sent"&&text&&text!==S.item.draft) await api(`/outreach/${id}`,"PATCH",{text});
-  const item=await api(`/outreach/${id}/events`,"POST",{action:type,note});
-  if(modal.open&&field.isConnected) {S.item=item;showConversation();}
+  const title=$("#dialog-title"), data={action:type,note:$("#event-note").value};
+  if(type==="sent") data.message=$("#draft-text").value;
+  if(type==="followed_up") {
+    data.message=$("#follow-up-text").value;
+    data.expected_due_at=S.item.due_at;
+  }
+  const item=await api(`/outreach/${id}/events`,"POST",data);
+  if(modal.open&&title.isConnected) {S.item=item;showConversation();}
   await refreshState();
   if(S.page==="outreach") await render();
 }
@@ -307,6 +324,7 @@ async function act(action,id) {
     save:()=>jobFlag(id,"save"),apply:()=>jobFlag(id,"apply"),"job-back":showJob,find:()=>findPeople(id),
     person:()=>person(id===""?-1:Number(id)),conversation:()=>openConversation(id),
     "copy-query":()=>copy(S.query),"copy-message":()=>copy($("#draft-text").value),
+    "copy-follow-up":()=>copy($("#follow-up-text").value),
     rewrite:async()=>{
       const input=$("#draft-text"),result=await api("/rewrite","POST",{text:input.value});
       if(input.isConnected) input.value=result.text;
@@ -375,6 +393,9 @@ document.addEventListener("submit",event=>{
       }
       case "message":
         S.item=await api(`/outreach/${id}`,"PATCH",data);notice("Draft saved.");
+        break;
+      case "follow-up":
+        await api(`/outreach/${id}/follow-up`,"PATCH",data);notice("Follow-up draft saved.");
         break;
       case "thread":
         await api(`/outreach/${id}/gmail`,"POST",data);await openConversation(id);notice("Gmail thread linked.");
