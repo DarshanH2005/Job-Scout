@@ -239,8 +239,13 @@ class Store:
                             ORDER BY {order} LIMIT 31 OFFSET ?""", (*args, offset))
 
     def job(self, job_id):
-        return self.one("""SELECT j.*, c.name AS company, c.provider, c.status AS source_status
-                           FROM jobs j JOIN companies c ON c.id=j.company_id WHERE j.id=?""", (job_id,))
+        row = self.one("""SELECT j.*, c.name AS company, c.provider, c.status AS source_status
+                          FROM jobs j JOIN companies c ON c.id=j.company_id WHERE j.id=?""", (job_id,))
+        if row:
+            row["referrals"] = self.all("""SELECT o.id, o.contact_id, o.channel, o.state, o.due_at, c.name AS person
+                FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.job_id=?
+                ORDER BY o.state IN ('closed','submitted'), o.id DESC""", (job_id,))
+        return row
 
     def inbox(self):
         return self.all(OUTREACH_SELECT + " ORDER BY CASE WHEN o.state='waiting' THEN o.due_at END ASC NULLS LAST, o.id DESC")

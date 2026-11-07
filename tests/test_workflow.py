@@ -403,3 +403,23 @@ def test_conversation_link_is_separate_from_contact_source_and_draft(desk):
     assert linked["draft"] == item["draft"] and linked["state"] == "draft" and linked["events"] == []
     assert result(client.get(path))["conversation_url"] == thread
     assert result(client.patch(path + "/conversation-link", json={"url": ""}))["conversation_url"] == ""
+
+
+def test_job_detail_lists_only_its_referrals(desk):
+    client, _ = desk
+    first = saved_job(client)
+    second = result(client.post("/api/jobs", json={
+        "company": first["company"], "title": "Software Engineer, Intern", "url": "https://sample.example/intern",
+    }), 201)
+    assert result(client.get(f"/api/jobs/{first['id']}"))["referrals"] == []
+    closed = create_draft(client, first, "gmail")
+    active = action(client, create_draft(client, first), "sent")
+    action(client, closed, "closed")
+    create_draft(client, second)
+    detail = result(client.get(f"/api/jobs/{first['id']}"))
+    assert [item["id"] for item in detail["referrals"]] == [active["id"], closed["id"]]
+    assert detail["referrals"][0]["due_at"] == active["due_at"]
+    assert detail["referrals"][0]["person"] == "Jane Example"
+    assert "draft" not in detail["referrals"][0]
+    flagged = result(client.patch(f"/api/jobs/{first['id']}", json={"hidden": True}))
+    assert flagged["referrals"] == detail["referrals"]

@@ -233,11 +233,16 @@ function employer(id) {
 async function openJob(id) { S.job=await api(`/jobs/${id}`); S.people=[]; showJob(); }
 function showJob() {
   const job=S.job;
+  const referrals=job.referrals||[];
   dialog(job.title,`${job.company} · ${regions[job.region]}`,`<div class="actions">
     ${L("Apply on company site",job.apply_url,"primary")}${B(job.saved?"Remove from saved":"Save job","save",job.id)}${B(job.applied_at?"Undo applied":"Mark applied","apply",job.id)}
     ${B(job.hidden?"Restore to job feed":"Hide from job feed","hide",job.id)}</div>
     <p class="micro">${job.posted_at?`Employer posted ${date(job.posted_at)} · `:""}First seen ${date(job.first_seen)}${job.archived?" · No longer on feed":job.source_status==="failed"?" · Latest feed check failed":""}</p>
     ${job.evidence?`<div class="evidence"><strong>Location evidence</strong><br>${E(job.evidence)}</div>`:""}
+    ${referrals.length?`<section class="section"><h3>Referral conversations</h3><div class="panel">
+      ${referrals.map(i=>`<div class="inbox-row"><div><strong>${E(i.person)}</strong><span class="micro">${channels[i.channel]}${i.due_at?` · Check ${date(i.due_at)}`:""}</span></div>
+      <div class="actions">${tag(stages[i.state],i.state==="submitted"?"good":"")}${B("Open referral","job-conversation",i.id,"small")}</div></div>`).join("")}
+    </div></section>`:""}
     ${job.description?`<details><summary>View job description</summary><div class="description">${E(job.description)}</div></details>`:""}
     <section class="section"><p class="eyebrow">REFERRAL RESEARCH</p><div class="actions">${B("Find people","find",job.id,"primary")}${B("Add someone I know","person")}</div><div id="people"></div></section>`);
 }
@@ -250,8 +255,12 @@ async function findPeople(id) {
     S.people=result.people; S.query=result.query;
     const hint={needs_key:"Set a Brave Search key to enable public research. You can use this LinkedIn query now.",
       unavailable:"Public search is temporarily unavailable. Try the LinkedIn query.",searched:"Verify current employment before sending."}[result.status];
-    target.innerHTML=`${S.people.map((p,index)=>`<div class="person"><strong>${E(p.name)}</strong><p>${E(p.title)}</p><p>${E(p.reason)}</p><p>${E(p.notes)}</p>
-    <div class="actions">${p.source?L("View source",p.source):""}${B("Use this person","person",index,"small")}</div></div>`).join("")}
+    target.innerHTML=`${S.people.map((p,index)=>{
+      const existing=(S.job.referrals||[]).find(i=>i.contact_id===p.id&&!["closed","submitted"].includes(i.state));
+      const action=existing?B("Continue referral","job-conversation",existing.id,"small"):B("Use this person","person",index,"small");
+      return `<div class="person"><strong>${E(p.name)}</strong><p>${E(p.title)}</p><p>${E(p.reason)}</p><p>${E(p.notes)}</p>
+      <div class="actions">${p.source?L("View source",p.source):""}${action}</div></div>`;
+    }).join("")}
     ${hint?`<p class="hint">${E(hint)}</p>`:""}<div class="actions">
     ${L("Search LinkedIn",`https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(S.query)}`)}${B("Copy search query","copy-query","","small")}</div>`;
   } catch(error) { if(target.isConnected) target.textContent=error.message; throw error; }
@@ -267,7 +276,11 @@ function person(index) {
     <label>One relevant fact about you <span class="hint">Optional. For example, “I built a Python and SQL pipeline for a student project.”</span><input name="evidence" maxlength="350"></label>
     <div class="actions"><button class="button primary">Prepare draft</button>${B("Back to job","job-back")}</div></form>`);
 }
-async function openConversation(id) { S.item=await api(`/outreach/${id}`); showConversation(); }
+async function openConversation(id, returnJob=null) {
+  S.item=await api(`/outreach/${id}`);
+  S.returnJob=returnJob;
+  showConversation();
+}
 function followUpText(item) {
   const first = item.person.split(/\s+/)[0];
   return `Hi ${first}, I wanted to follow up on my referral request for the ${item.job_title} role at ${item.company}. If you’re able to point me in the right direction, I’d appreciate it.\n\nThanks again!`;
@@ -293,6 +306,7 @@ function showConversation() {
   const original = i.events.find(e=>e.kind==="sent"&&e.message)?.message || i.draft;
   const event=(label,action,style="small")=>B(label,`event-${action}`,i.id,style);
   dialog(i.person,`${i.company} · ${channels[i.channel]} · ${stages[i.state]}`,`<p class="micro">${E(i.job_title)}${i.due_at?` · Next check ${date(i.due_at)}`:""}</p>
+    ${S.returnJob?`<div class="actions">${B("Back to job","job",S.returnJob,"small")}</div>`:""}
     <div class="actions" id="handoff-links">${handoffLinks(i)}</div>
     ${i.state==="draft"?`<form class="form" data-form="message" data-id="${i.id}"><label>Editable message<textarea id="draft-text" name="text" maxlength="4000" required>${E(i.draft)}</textarea></label>
     <div class="actions">${B("Copy message","copy-message","","primary")}<button class="button">Save edits</button>${S.info.rewrite_configured?B("AI rewrite","rewrite"):""}</div></form>`:
@@ -363,6 +377,7 @@ async function act(action,id) {
     "toggle-hidden":()=>{S.hidden=!S.hidden;S.offset=0;return render();},
     save:()=>jobFlag(id,"save"),apply:()=>jobFlag(id,"apply"),hide:()=>jobFlag(id,"hide"),"job-back":showJob,find:()=>findPeople(id),
     person:()=>person(id===""?-1:Number(id)),conversation:()=>openConversation(id),
+    "job-conversation":()=>openConversation(id,S.job.id),
     "copy-query":()=>copy(S.query),"copy-message":()=>copy($("#draft-text").value),
     "copy-follow-up":()=>copy($("#follow-up-text").value),
     rewrite:async()=>{
@@ -428,7 +443,7 @@ document.addEventListener("submit",event=>{
       case "draft": {
         const {channel,evidence,...contact}=data;
         const item=await api(`/jobs/${S.job.id}/draft`,"POST",{channel,evidence,contact:{...contact,notes:S.notes}});
-        await openConversation(item.id);notice("Draft ready to review.");
+        await openConversation(item.id,S.job.id);notice("Draft ready to review.");
         break;
       }
       case "message":
@@ -448,7 +463,7 @@ document.addEventListener("submit",event=>{
         break;
       }
       case "thread":
-        await api(`/outreach/${id}/gmail`,"POST",data);await openConversation(id);notice("Gmail thread linked.");
+        await api(`/outreach/${id}/gmail`,"POST",data);await openConversation(id,S.returnJob);notice("Gmail thread linked.");
         break;
     }
   });
