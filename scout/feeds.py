@@ -47,6 +47,17 @@ YEARS = re.compile(
     r"(?<![\d.])\b(?P<minimum>\d{1,2})\s*(?:(?:[-–]|to)\s*\d{1,2}|\+|or more)?\s*years?\s+"
     r"(?:of\s+(?:[^\n.!?;:]{0,75}\s+)?experience\b|experience\b|(?:working|building|developing|designing|managing)\b)", re.I
 )
+EXPERIENCE_MONTHS = re.compile(r"\b\d{1,2}\s*\+?\s*months?\s+of\s+(?:professional\s+|relevant\s+|industry\s+)?experience\b", re.I)
+EDUCATION = re.compile(
+    r"\b(?:(?:currently|must be) (?:pursuing|enrolled(?: in)?) [^.!?;]{0,65}\b(?:degree|program|college|university)"
+    r"|\d+\s+years? of (?:university|college) education)\b", re.I
+)
+DEGREE = re.compile(r"\b(?:degree|graduat\w*)\b", re.I)
+GRAD_DATE = re.compile(r"\b(?:by|between|before|after|in|through|from|expected|class of)\b[^.!?;\n]{0,36}\b20\d{2}\b", re.I)
+MINIMUM_HEADING = re.compile(r"(?:minimum|basic|required) (?:requirements|qualifications|experience|skills)|requirements|required|must have", re.I)
+PREFERRED_HEADING = re.compile(r"preferred(?: (?:requirements|qualifications|experience|skills))?|nice to have|bonus points", re.I)
+OTHER_HEADING = re.compile(r"(?:about (?:us|the role|the team)|responsibilities|benefits|compensation|in-office expectations|what (?:you.ll do|we offer|we.re looking for)|equal opportunity)", re.I)
+COMPANY_BACKGROUND = re.compile(r"^(?:we|our (?:company|team)|the company) (?:have|has|bring|brings|offer|offers)\b", re.I)
 
 
 class PlainText(HTMLParser):
@@ -175,6 +186,32 @@ def assess(title, department, description, region):
            for match in YEARS.finditer(description[:16000])):
         return 0, ""
     return 55, "Relevant role. Check the experience requirements."
+
+
+def eligibility_evidence(description):
+    """Keep explicit excerpts and the employer's qualification labels when present."""
+    section, evidence, seen = "From the posting", [], set()
+    for line in description.splitlines():
+        heading = line.strip(" #*•●:\t")
+        if MINIMUM_HEADING.fullmatch(heading):
+            section = "Required"
+            continue
+        if PREFERRED_HEADING.fullmatch(heading):
+            section = "Preferred"
+            continue
+        if OTHER_HEADING.fullmatch(heading):
+            section = "From the posting"
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z])", line):
+            excerpt = sentence.strip(" \t*•●")
+            if not excerpt or len(excerpt) > 420 or excerpt in seen or COMPANY_BACKGROUND.search(excerpt):
+                continue
+            if (YEARS.search(excerpt) or EXPERIENCE_MONTHS.search(excerpt) or EDUCATION.search(excerpt)
+                    or (DEGREE.search(excerpt) and GRAD_DATE.search(excerpt))):
+                evidence.append({"label": section, "text": excerpt})
+                seen.add(excerpt)
+    priority = {"Required": 0, "From the posting": 1, "Preferred": 2}
+    return sorted(evidence, key=lambda item: priority[item["label"]])[:4]
 
 
 def normalize(provider, raw):

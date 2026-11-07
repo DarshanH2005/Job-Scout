@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import scout.app as app_module
-from scout.feeds import build_job, fetch_board, geography, normalize
+from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, normalize
 from scout.gmail import Gmail, incoming_reply
 from scout.research import public_candidates
 from scout.store import Store
@@ -423,3 +423,21 @@ def test_job_detail_lists_only_its_referrals(desk):
     assert "draft" not in detail["referrals"][0]
     flagged = result(client.patch(f"/api/jobs/{first['id']}", json={"hidden": True}))
     assert flagged["referrals"] == detail["referrals"]
+
+
+def test_job_detail_quotes_required_and_preferred_eligibility(desk):
+    client, _ = desk
+    minimum = "Degree obtained by summer 2027, with no more than 18 months of professional experience."
+    preferred = "At least 1 year of university education, or equivalent work experience."
+    description = "\n".join((
+        "About us", "Our company has 20 years of experience.", "Minimum requirements", minimum,
+        "Preferred qualifications", preferred, "Responsibilities", "Help the engineering team.",
+    ))
+    job = result(client.post("/api/jobs", json={
+        "company": "Sample Company", "title": "Software Engineer, New Grad",
+        "url": "https://sample.example/new-grad", "description": description,
+    }), 201)
+    assert result(client.get(f"/api/jobs/{job['id']}"))["eligibility"] == [
+        {"label": "Required", "text": minimum}, {"label": "Preferred", "text": preferred},
+    ]
+    assert eligibility_evidence("Our company has 20 years of experience.") == []

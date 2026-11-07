@@ -109,6 +109,9 @@ dialog::backdrop{background:#142d24a0}
 .dialog-body{padding:17px 20px 20px}
 .dialog-body .actions{margin-bottom:13px}
 .evidence{padding:10px 12px;border-left:3px solid #90b497;background:#f3f7f1;margin:11px 0;font-size:13px;overflow-wrap:anywhere}
+.eligibility-list{list-style:none;margin:4px 0 0;padding:0}
+.eligibility-list li{margin-top:6px;line-height:1.55}
+.eligibility-list .badge{margin-right:4px;white-space:nowrap}
 .description{white-space:pre-wrap;max-height:240px;overflow:auto;font-size:13px;line-height:1.6;background:#f6f7f3;padding:12px;border-radius:8px}
 details summary{cursor:pointer;color:var(--green);font-weight:650;font-size:13px}
 .person{border:1px solid var(--line);border-radius:10px;padding:10px;margin:8px 0;overflow-wrap:anywhere}

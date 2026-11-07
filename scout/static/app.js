@@ -239,6 +239,8 @@ function showJob() {
     ${B(job.hidden?"Restore to job feed":"Hide from job feed","hide",job.id)}</div>
     <p class="micro">${job.posted_at?`Employer posted ${date(job.posted_at)} · `:""}First seen ${date(job.first_seen)}${job.archived?" · No longer on feed":job.source_status==="failed"?" · Latest feed check failed":""}</p>
     ${job.evidence?`<div class="evidence"><strong>Location evidence</strong><br>${E(job.evidence)}</div>`:""}
+    ${job.eligibility?.length?`<section class="evidence" aria-label="Eligibility evidence"><strong>Eligibility evidence</strong>
+      <ul class="eligibility-list">${job.eligibility.map(item=>`<li>${tag(item.label)} <span>${E(item.text)}</span></li>`).join("")}</ul></section>`:""}
     ${referrals.length?`<section class="section"><h3>Referral conversations</h3><div class="panel">
       ${referrals.map(i=>`<div class="inbox-row"><div><strong>${E(i.person)}</strong><span class="micro">${channels[i.channel]}${i.due_at?` · Check ${date(i.due_at)}`:""}</span></div>
       <div class="actions">${tag(stages[i.state],i.state==="submitted"?"good":"")}${B("Open referral","job-conversation",i.id,"small")}</div></div>`).join("")}
