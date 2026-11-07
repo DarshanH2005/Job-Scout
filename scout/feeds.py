@@ -30,6 +30,7 @@ FULL_TIME_OFFICE = re.compile(
     r"\b(?:work|working|be)\b[^.!?\n]{0,90}\boffice\b[^.!?\n]{0,48}\b(?:5|five)\s+days\s*(?:/|a\s+|per\s+)week\b", re.I
 )
 GENERAL_REMOTE_POLICY = re.compile(r"\bfor\s+(?:(?:us|u\.s\.)[- ]based\s+)?roles\s+open\s+to\s+remote\s+work\b", re.I)
+ALL_ROLES_REMOTE = re.compile(r"^\W*all (?:of )?our (?:roles|positions) are remote\b", re.I)
 RESTRICTION = re.compile(r"\b(only|must|within|eligible|authorized|based|limited|available)\b", re.I)
 US_REMOTE = re.compile(r"\b(?:remote\s*[-–—,:(/|]*\s*(?:us|usa|united states)\b|(?:us|usa|united states)\s*[-–—,:(/|]*\s*remote\b)", re.I)
 ROLE = re.compile(
@@ -135,6 +136,10 @@ def geography(location, workplace, description):
         india_remote = bool(REMOTE.search(workplace)) or any(
             INDIA.search(part) and REMOTE.search(part) for part in re.split(r"[;|]", location)
         )
+        if not india_remote and not re.search(r"\b(hybrid|on[- ]?site|in[- ]office)\b", source, re.I):
+            policy = next((line for line in lines if len(line) < 420 and ALL_ROLES_REMOTE.search(line)), None)
+            if policy:
+                return "india_remote", f"{location} · {policy}"
         return ("india_remote" if india_remote else "india"), source
     if WORLDWIDE.search(location):
         return "india_remote", source

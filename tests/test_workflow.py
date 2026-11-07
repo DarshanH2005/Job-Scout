@@ -263,6 +263,14 @@ def test_posting_requirements_take_precedence_over_general_remote_policy():
                      "5-7 years experience writing production-grade code.", "https://sample.example/3")["score"] == 0
 
 
+def test_explicit_all_remote_policy_uses_the_postings_india_location():
+    policy = "All of our roles are remote, however some roles have location-based eligibility requirements."
+    assert geography("Bangalore, India", "", policy) == ("india_remote", "Bangalore, India · " + policy)
+    assert geography("Bangalore, India", "Hybrid", policy)[0] == "india"
+    assert geography("Bangalore, India", "", "Some of our roles are remote.")[0] == "india"
+    assert geography("Bangalore, India", "", "Not all of our roles are remote.")[0] == "india"
+
+
 @pytest.mark.parametrize(("retry_after", "expected"), [("0", 2), ("120", 1)])
 def test_temporary_feed_retry_respects_delay(retry_after, expected):
     requests = []
