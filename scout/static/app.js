@@ -1,6 +1,6 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const content = $("#content"), modal = $("#dialog"), body = $("#dialog-content");
-const S = {page:"jobs", info:null, offset:0, search:"", region:"", latest:false, levels:false,
+const S = {page:"jobs", info:null, offset:0, search:"", region:"", latest:false, levels:"relevant", recent:"0",
   companies:[], companySearch:"", source:"", job:null, item:null, people:[], serial:0};
 const regions = {india_remote:"Remote from India",india:"India-based",us_remote:"U.S. remote",unclear:"Eligibility unclear",other:"Other location"};
 const channels = {linkedin:"LinkedIn",gmail:"Gmail",community:"Referral community"};
@@ -90,13 +90,14 @@ async function refreshJobs() {
   const box=$("#job-results");
   if (!box) return;
   const serial=++S.serial, saved=S.page==="saved";
-  const params=new URLSearchParams({view:saved?"saved":"latest",region:S.region,search:S.search,latest:S.latest,all_levels:S.levels,offset:S.offset});
+  const params=new URLSearchParams({view:saved?"saved":"latest",region:S.region,search:S.search,latest:S.latest,
+    all_levels:S.levels==="all",early_only:S.levels==="early",recent_days:S.recent,offset:S.offset});
   const {items,more}=await api(`/jobs?${params}`);
   if (!box.isConnected||serial!==S.serial) return;
   box.innerHTML=items.length?`<div class="job-list">${items.map(jobRow).join("")}</div>`:
     saved?empty("Your shortlist is empty","Review a role and save it to come back to it later.",'<a href="#jobs">Browse the job feed →</a>'):
     !S.info.scan?.finished_at&&!S.search?empty("Ready for your first scan","Start with the employer feeds already configured in your watchlist.",B("Find latest jobs","scan","","primary")):
-    empty("No jobs in this view","Try another location, clear the search, or include all experience levels.");
+    empty("No jobs in this view","Try a broader date range, experience level, or location.");
   if (S.offset||more) box.innerHTML+=`<div class="pager">${S.offset?B("← Previous","prev","","small"):"<span></span>"}
     <span class="micro">${S.offset+1}–${S.offset+items.length}</span>${more?B("Next →","next","","small"):"<span></span>"}</div>`;
   box.setAttribute("aria-busy","false");
@@ -108,8 +109,10 @@ function jobPage() {
     <div class="work-grid"><div>${head(saved?"Saved jobs":"Latest openings",saved?"Keep track of roles you’re considering and applications you’ve sent.":"Early-career software, data and AI roles from employer feeds.","",saved?"h1":"h2")}
     <div class="filters"><input type="search" id="job-search" aria-label="Search jobs" placeholder="Search roles or companies" value="${E(S.search)}">
     <select id="region" aria-label="Location">${select({"":"All locations",...regions},S.region)}</select></div>
-    ${saved?"":`<div class="filters"><label><input type="checkbox" id="latest" ${S.latest?"checked":""}> New since last scan</label>
-    <label><input type="checkbox" id="levels" ${S.levels?"checked":""}> All experience levels</label></div>`}
+    ${saved?"":`<div class="filters shortlist-filters">
+    <select id="levels" aria-label="Experience level">${select({relevant:"Relevant roles",early:"Explicit early-career roles",all:"All experience levels"},S.levels)}</select>
+    <select id="recent" aria-label="Posting age">${select({"0":"Any posting date","7":"Last 7 days","30":"Last 30 days"},S.recent)}</select>
+    <label><input type="checkbox" id="latest" ${S.latest?"checked":""}> New since last scan</label></div>`}
     <div id="job-results" aria-busy="true"><div class="panel loading">Loading jobs…</div></div></div>
     <aside class="aside"><div class="panel" id="coverage-panel">${coverage()}</div><div class="panel"><p class="eyebrow">FROM JOB TO REFERRAL</p>
     <h3>What to do next</h3><ol><li>Review a role and its location.</li><li>Find someone relevant to ask.</li><li>Send your message and log it.</li></ol>
@@ -391,7 +394,7 @@ document.addEventListener("input",event=>{
 document.addEventListener("change",async event=>{
   const input=event.target;
   try {
-    if(["region","latest","levels"].includes(input.id)) {
+    if(["region","latest","levels","recent"].includes(input.id)) {
       S[input.id]=input.type==="checkbox"?input.checked:input.value;S.offset=0;await refreshJobs();
     } else if(input.id==="source") {
       S.source=input.value;$("#company-results").innerHTML=companyRows();

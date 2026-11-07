@@ -35,10 +35,11 @@ ROLE = re.compile(
     r"(?:engineer(?:ing)?|develop(?:er|ment)|scientist)\b|\b(?:"
     r"software developer|developer|data scientist|data analyst|mlops|sde|swe|sre|research engineer)\b", re.I
 )
-EARLY = re.compile(r"\b(intern(?:ship)?|new grad(?:uate)?|early career|university grad(?:uate)?|entry[ -]level|junior|associate|graduate|apprentice|level 1|engineer i|sde[- ]?1)\b", re.I)
-SENIOR = re.compile(r"\b(senior|sr\.?|intermediate|mid[ -]level|staff|principal|manager|director|head|lead|architect|distinguished|vp|engineer (?:iii|iv|v)|sde[- ]?[345])\b", re.I)
+EARLY = re.compile(r"\b(intern(?:ship)?|new grad(?:uate)?|early career|university grad(?:uate)?|entry[ -]level|junior|associate|graduate|apprentice|level 1|engineer (?:i|1)|sde[- ]?1)\b", re.I)
+SENIOR = re.compile(r"\b(senior|sr\.?|intermediate|mid[ -]level|staff|principal|manager|director|head|lead|architect|distinguished|vp|engineer (?:iii|iv|v|[3-5])|sde[- ]?[345])\b", re.I)
+EARLY_SCORE = 90
 YEARS = re.compile(
-    r"(?<![\d.])(?:[3-9]|[1-3]\d)\s*(?:[-–]\s*\d{1,2}|\+|or more)?\s*years?\s+"
+    r"(?<![\d.])\b(?P<minimum>\d{1,2})\s*(?:(?:[-–]|to)\s*\d{1,2}|\+|or more)?\s*years?\s+"
     r"(?:of\s+(?:[^\n.!?;:]{0,75}\s+)?experience\b|(?:working|building|developing|designing|managing)\b)", re.I
 )
 
@@ -156,8 +157,9 @@ def assess(title, department, description, region):
     if SENIOR.search(title):
         return 0, ""
     if EARLY.search(title):
-        return 90, "Relevant role with an early-career title"
-    if YEARS.search(description[:16000]):
+        return EARLY_SCORE, "Relevant role with an early-career title"
+    if any(int(match["minimum"]) >= 3 and not re.search(r"\bup to\s*$", description[max(0, match.start()-12):match.start()], re.I)
+           for match in YEARS.finditer(description[:16000])):
         return 0, ""
     return 55, "Relevant role. Check the experience requirements."
 
@@ -223,9 +225,7 @@ async def fetch_board(client, company, limit):
             if provider == "smartrecruiters":
                 rows = await smartrecruiters_postings(client, url)
             else:
-                response = await client.get(url)
-                response.raise_for_status()
-                payload = response.json()
+                payload = await fetch_json(client, url)
                 rows = payload if provider == "lever" else payload["jobs"]
             if not isinstance(rows, list):
                 raise ValueError("The provider returned an unexpected feed format.")
@@ -241,13 +241,30 @@ async def fetch_board(client, company, limit):
             await asyncio.sleep(0.15)
 
 
+async def fetch_json(client, url, params=None):
+    for attempt in range(2):
+        try:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            retry_after = exc.response.headers.get("Retry-After")
+            if attempt or exc.response.status_code not in {429, 502, 503, 504}:
+                raise
+            if retry_after and (not retry_after.isdecimal() or len(retry_after) > 2 or int(retry_after) > 4):
+                raise
+            await asyncio.sleep(int(retry_after) if retry_after else 0.4)
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError):
+            if attempt:
+                raise
+            await asyncio.sleep(0.4)
+
+
 async def smartrecruiters_postings(client, url):
     rows = []
     limit = 100
     while True:
-        response = await client.get(url, params={"limit": limit, "offset": len(rows)})
-        response.raise_for_status()
-        page = response.json()
+        page = await fetch_json(client, url, {"limit": limit, "offset": len(rows)})
         postings, total = page["content"], page["totalFound"]
         if not isinstance(postings, list) or not isinstance(total, int) or not 0 <= total <= 20000:
             raise ValueError("Unexpected SmartRecruiters page.")

@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .feeds import EARLY_SCORE
+
 DATA = Path(__file__).with_name("companies.csv")
 EXPANDED_SOURCES = ("Databricks", "HP", "ServiceNow", "Snowflake", "Zscaler")
 
@@ -183,17 +185,23 @@ class Store:
                               (company_id, *[job[field] for field in JOB_FIELDS], observed, observed, scan_id, manual))
         return result.lastrowid, True
 
-    def jobs(self, *, view, region, search, latest, all_levels, offset):
+    def jobs(self, *, view, region, search, latest, all_levels, offset, early_only=False, recent_days=0):
         args = []
         clauses = []
         if view == "saved":
             clauses.append("(j.saved=1 OR j.applied_at IS NOT NULL)")
         else:
             clauses.append("j.archived=0 AND (c.enabled=1 OR j.manual=1)")
-            if not all_levels:
+            if early_only:
+                clauses.append("j.score>=?")
+                args.append(EARLY_SCORE)
+            elif not all_levels:
                 clauses.append("(j.score>0 OR j.manual=1)")
             if latest:
                 clauses.append("j.new_scan=(SELECT MAX(id) FROM scans WHERE state='completed')")
+            if recent_days:
+                clauses.append("coalesce(julianday(j.posted_at),julianday(j.first_seen))>=julianday('now')-?")
+                args.append(recent_days)
         if region:
             clauses.append("j.region=?")
             args.append(region)
@@ -203,7 +211,7 @@ class Store:
         where = " AND ".join(clauses)
         order = """CASE j.region WHEN 'india_remote' THEN 0 WHEN 'india' THEN 0 WHEN 'us_remote' THEN 2
                    WHEN 'unclear' THEN 3 ELSE 4 END, c.status='failed', j.score DESC,
-                   coalesce(j.posted_at,j.first_seen) DESC, j.id DESC"""
+                   coalesce(julianday(j.posted_at),julianday(j.first_seen)) DESC, j.id DESC"""
         return self.all(f"""SELECT j.id,j.title,j.location,j.url,j.apply_url,j.posted_at,j.first_seen,j.last_seen,j.new_scan,
                                    j.region,j.evidence,j.reason,j.score,j.saved,j.applied_at,j.archived,j.manual,
                                    c.name AS company,c.provider,c.status AS source_status

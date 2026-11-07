@@ -232,3 +232,41 @@ def test_smartrecruiters_rejects_incomplete_snapshot():
     jobs, error = asyncio.run(read())
     assert calls == ["0", "1"]
     assert not jobs and error
+
+
+def test_shortlist_experience_and_posting_age(desk):
+    client, store = desk
+    junior = saved_job(client)
+    old = result(client.post("/api/jobs", json={
+        "company": "Sample Company", "title": "Software Engineer 1",
+        "url": "https://sample.example/careers/old",
+    }), 201)
+    experienced = result(client.post("/api/jobs", json={
+        "company": "Sample Company", "title": "Software Engineer 3",
+        "url": "https://sample.example/careers/experienced",
+    }), 201)
+    store.write("UPDATE jobs SET posted_at='2000-01-01T00:00:00Z' WHERE id=?", (old["id"],))
+    assert {row["id"] for row in result(client.get("/api/jobs?early_only=true"))["items"]} == {junior["id"], old["id"]}
+    assert [row["id"] for row in result(client.get("/api/jobs?early_only=true&recent_days=7"))["items"]] == [junior["id"]]
+    assert experienced["score"] == 0
+    ranged = build_job("2", "Software Engineer", "", "India", "", "2–4 years of experience.", "https://sample.example/2")
+    assert ranged["score"] > 0
+
+
+@pytest.mark.parametrize(("retry_after", "expected"), [("0", 2), ("120", 1)])
+def test_temporary_feed_retry_respects_delay(retry_after, expected):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503, headers={"Retry-After": retry_after})
+        return httpx.Response(200, json={"jobs": []})
+
+    async def read():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await fetch_board(client, {"provider": "greenhouse", "board": "sample"}, asyncio.Semaphore(1))
+
+    _, error = asyncio.run(read())
+    assert len(requests) == expected
+    assert (error is None) == (expected == 2)

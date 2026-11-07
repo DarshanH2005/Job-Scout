@@ -287,11 +287,12 @@ def create_app(db_path=None, seed=True):
 
     @app.get("/api/jobs")
     async def jobs(view: str = "latest", region: str = "", search: str = Query("", max_length=130),
-                   latest: bool = False, all_levels: bool = False, offset: int = Query(0, ge=0, le=50000)):
+                   latest: bool = False, all_levels: bool = False, offset: int = Query(0, ge=0, le=50000),
+                   early_only: bool = False, recent_days: int = Query(0, ge=0, le=365)):
         if region and region not in REGIONS:
             fail("Unknown location filter.")
         items = store.jobs(view=view, region=region, search=search.strip(), latest=latest,
-                           all_levels=all_levels, offset=offset)
+                           all_levels=all_levels, offset=offset, early_only=early_only, recent_days=recent_days)
         return {"items": items[:30], "more": len(items) > 30}
 
     @app.get("/api/jobs/{job_id}")

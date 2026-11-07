@@ -65,6 +65,7 @@ h1{font-size:clamp(35px,4.4vw,57px);font-weight:680;letter-spacing:-.058em;line-
 .filters{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
 .filters input[type=search]{flex:1 1 170px}
 .filters select{max-width:240px}
+.shortlist-filters select{flex:0 1 auto;width:auto;max-width:100%}
 .filters label{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)}
 input:not([type=checkbox]),select,textarea{width:100%;border:1px solid #ccd8cd;border-radius:8px;padding:8px 10px;color:var(--ink);background:white;min-height:38px}
 input[type=checkbox]{accent-color:#286448;width:16px;height:16px;margin:0}
