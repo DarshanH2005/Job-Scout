@@ -53,6 +53,11 @@ h1{font-size:clamp(35px,4.4vw,57px);font-weight:680;letter-spacing:-.058em;line-
 .stat strong{display:block;font-size:23px;line-height:1.13;letter-spacing:-.035em;font-variant-numeric:tabular-nums}
 .stat small{display:block;color:var(--muted);font-size:12px;margin-top:3px}
 .work-grid{display:grid;grid-template-columns:minmax(0,1fr) 290px;align-items:start;gap:18px}
+.has-next-actions{grid-template-areas:"jobs next" "jobs aside";grid-template-rows:auto 1fr}
+.has-next-actions .job-main{grid-area:jobs}
+.has-next-actions .aside{grid-area:aside}
+.next-actions-panel{grid-area:next}
+.next-actions-panel h3{margin-bottom:8px;font-size:16px}
 .aside{display:grid;gap:13px}
 .aside .panel,.panel.padded{padding:17px}
 .aside h3{margin-bottom:8px;font-size:16px}
@@ -86,6 +91,10 @@ textarea{resize:vertical;min-height:110px}
 .coverage{display:grid;gap:6px;margin-bottom:12px}
 .coverage div{display:flex;justify-content:space-between;color:var(--muted);font-size:12px}
 .coverage strong{color:var(--ink);font-variant-numeric:tabular-nums}
+.next-actions-list{list-style:none;margin:0;padding:0}
+.next-actions-list li{margin:0;padding:7px 0}
+.next-actions-list li+li{border-top:1px solid var(--line)}
+.next-actions-list .job-title{font-size:13px;line-height:1.3}
 .pager{margin:14px 0;display:flex;justify-content:space-between;align-items:center}
 .company-row,.inbox-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 14px}
 .company-row:not(:last-child),.inbox-row:not(:last-child){border-bottom:1px solid var(--line)}
@@ -126,3 +135,4 @@ details summary{cursor:pointer;color:var(--green);font-weight:650;font-size:13px
 @media(max-width:690px){.shell{padding-inline:15px}.topbar{height:auto}.top-inner{flex-wrap:wrap;gap:2px;padding-top:10px}.brand{padding-bottom:6px}nav{width:100%;height:36px;gap:18px;overflow-x:auto}.hero{margin-top:19px;padding:23px 17px 17px}.radar{opacity:.48;width:64%}.work-grid,.settings-grid{grid-template-columns:1fr}.stats{gap:6px}.stat{padding:8px 7px;gap:5px;min-height:59px}.stat-icon{display:none}.stat strong{font-size:20px}.stat small{font-size:11px}.page-head h1,.page-head h2{font-size:25px}.job-row{grid-template-columns:33px minmax(0,1fr);gap:9px;padding:10px}.job-mark{width:33px;height:33px}.job-row .actions{grid-column:2}.company-row,.inbox-row{align-items:flex-start}.footer{flex-direction:column;gap:3px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;scroll-behavior:auto!important}.button:active{transform:none}}
 @media(max-width:690px){.top-tools{order:1}nav{order:2}}
+@media(max-width:690px){.has-next-actions{grid-template-areas:"next" "jobs" "aside";grid-template-rows:auto}}

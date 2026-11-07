@@ -19,6 +19,7 @@ const head = (title,text,action="",h="h1") => `<div class="page-head"><div><${h}
 const empty = (title,text,action="") => `<div class="panel empty"><strong>${E(title)}</strong><p>${E(text)}</p>${action}</div>`;
 const select = (values,selected="") => Object.entries(values).map(([id,name])=>`<option value="${id}" ${id===selected?"selected":""}>${E(name)}</option>`).join("");
 let messageTimer, pollTimer, searchTimer;
+let actionsRequest=0;
 
 async function api(path,method="GET",data) {
   const response = await fetch(`/api${path}`,{method,headers:data?{"Content-Type":"application/json"}:undefined,
@@ -113,12 +114,35 @@ async function refreshJobs() {
     <span class="micro">${S.offset+1}–${S.offset+items.length}</span>${more?B("Next →","next","","small"):"<span></span>"}</div>`;
   box.setAttribute("aria-busy","false");
 }
+async function refreshNextActions() {
+  const target=$("#next-action-items");
+  if(!target) return;
+  const request=++actionsRequest, local=new Date();
+  const today=[local.getFullYear(),local.getMonth()+1,local.getDate()].map(value=>String(value).padStart(2,"0")).join("-");
+  try {
+    const {applications,referrals}=await api(`/next-actions?today=${today}`);
+    if(!target.isConnected||request!==actionsRequest) return;
+    const labels={waiting:"Check for a reply",replied:"Review reply",offered:"Review referral offer",draft:"Review draft"};
+    const rows=[
+      ...applications.map(job=>`<li><button class="job-title" data-action="job" data-id="${job.id}">${E(job.title)}</button>
+        <div class="micro">${E(job.company)} · Target ${date(job.application_target)}${job.archived?" · Absent in recent scans":""}</div></li>`),
+      ...referrals.map(item=>`<li><button class="job-title" data-action="conversation" data-id="${item.id}">${E(item.person)} · ${E(item.company)}</button>
+        <div class="micro">${labels[item.state]}${item.due_at?` · Due ${date(item.due_at)}`:""}</div></li>`),
+    ];
+    target.innerHTML=rows.length?`<ul class="next-actions-list">${rows.join("")}</ul>`:
+      '<p class="micro">No applications due or referrals to review.</p>';
+  } catch {
+    if(target.isConnected&&request===actionsRequest) target.textContent="Next actions could not load.";
+  }
+}
 function jobPage() {
   const {stats,scan}=S.info, saved=S.page==="saved", hidden=!saved&&S.hidden;
   const switcher=saved?"":B(hidden?"Back to job feed":`Hidden jobs (${num(stats.hidden)})`,"toggle-hidden","","small");
   const tiles=[[stats.companies,"Companies watched","⌗"],[stats.configured,"Automated feeds","↻"],[scan?.finished_at?stats.matches:null,"Matching openings","◎"]];
   return `${saved?"":`<div class="stats">${tiles.map(([n,label,icon])=>`<div class="stat"><span class="stat-icon" aria-hidden="true">${icon}</span><div><strong>${n===null?"—":num(n)}</strong><small>${label}</small></div></div>`).join("")}</div>`}
-    <div class="work-grid"><div>${head(saved?"Saved jobs":hidden?"Hidden jobs":"Latest openings",saved?"Keep track of roles you’re considering and applications you’ve sent.":hidden?"Review roles you’ve hidden and restore any you want to see again.":"Early-career software, data and AI roles from employer feeds.",switcher,saved?"h1":"h2")}
+    <div class="work-grid${saved?"":" has-next-actions"}">${saved?"":`<section class="panel padded next-actions-panel" aria-labelledby="next-actions-title">
+    <p class="eyebrow">YOUR CHECKLIST</p><h3 id="next-actions-title">Next actions</h3><div class="micro" id="next-action-items">Loading next actions…</div></section>`}
+    <div class="job-main">${head(saved?"Saved jobs":hidden?"Hidden jobs":"Latest openings",saved?"Keep track of roles you’re considering and applications you’ve sent.":hidden?"Review roles you’ve hidden and restore any you want to see again.":"Early-career software, data and AI roles from employer feeds.",switcher,saved?"h1":"h2")}
     <div class="filters"><input type="search" id="job-search" aria-label="Search jobs" placeholder="Search roles or companies" value="${E(S.search)}">
     <select id="region" aria-label="Location">${select({"":"All locations",...regions},S.region)}</select></div>
     ${saved||hidden?"":`<div class="filters shortlist-filters">
@@ -202,7 +226,7 @@ async function render() {
   if(page!==S.page||serial!==S.serial) return;
   content.innerHTML=html;
   content.setAttribute("aria-busy","false");
-  if(["jobs","saved"].includes(page)) await refreshJobs();
+  if(["jobs","saved"].includes(page)) await Promise.all([refreshJobs(),refreshNextActions()]);
 }
 function dialog(title,sub,html) {
   body.innerHTML=`<header class="dialog-head"><div><h2 id="dialog-title">${E(title)}</h2>${sub?`<p>${E(sub)}</p>`:""}</div>
@@ -378,7 +402,7 @@ async function jobFlag(id,kind) {
   if(kind==="hide") {
     await refreshState(); await render();
     notice(job.hidden?"Job hidden from the feed.":"Job restored to the feed.");
-  } else await refreshJobs();
+  } else await Promise.all([refreshJobs(),refreshNextActions()]);
 }
 async function eventAction(id,type) {
   const title=$("#dialog-title"), data={action:type,note:$("#event-note").value};
@@ -391,6 +415,7 @@ async function eventAction(id,type) {
   if(modal.open&&title.isConnected) {S.item=item;showConversation();}
   await refreshState();
   if(S.page==="outreach") await render();
+  else await refreshNextActions();
 }
 async function copy(text) {
   await navigator.clipboard.writeText(text);
@@ -471,7 +496,7 @@ document.addEventListener("submit",event=>{
       case "draft": {
         const {channel,evidence,...contact}=data;
         const item=await api(`/jobs/${S.job.id}/draft`,"POST",{channel,evidence,contact:{...contact,notes:S.notes}});
-        await openConversation(item.id,S.job.id);notice("Draft ready to review.");
+        await openConversation(item.id,S.job.id);await refreshNextActions();notice("Draft ready to review.");
         break;
       }
       case "message":
@@ -493,7 +518,7 @@ document.addEventListener("submit",event=>{
       case "application-target": {
         const job=await api(`/jobs/${id}`,"PATCH",{application_target:data.target||null});
         if(form.isConnected&&modal.open) {S.job=job;showJob();}
-        await refreshJobs();
+        await Promise.all([refreshJobs(),refreshNextActions()]);
         notice(job.application_target?"Target date saved.":"Target date cleared.");
         break;
       }

@@ -259,6 +259,19 @@ class Store:
     def inbox(self):
         return self.all(OUTREACH_SELECT + " ORDER BY CASE WHEN o.state='waiting' THEN o.due_at END ASC NULLS LAST, o.id DESC")
 
+    def next_actions(self, today):
+        applications = self.all("""SELECT j.id, j.title, j.application_target, j.archived, c.name AS company
+            FROM jobs j JOIN companies c ON c.id=j.company_id
+            WHERE j.saved=1 AND j.applied_at IS NULL AND j.application_target<=?
+            ORDER BY j.application_target, j.id LIMIT 3""", (today,))
+        referrals = self.all("""SELECT o.id, o.state, o.due_at, c.name AS person, co.name AS company
+            FROM outreach o JOIN contacts c ON c.id=o.contact_id
+            JOIN jobs j ON j.id=o.job_id JOIN companies co ON co.id=j.company_id
+            WHERE (o.state='waiting' AND o.due_at<=?) OR o.state IN ('replied','offered','draft')
+            ORDER BY CASE o.state WHEN 'waiting' THEN 0 WHEN 'replied' THEN 1 WHEN 'offered' THEN 2 ELSE 3 END,
+                     o.due_at, o.id DESC LIMIT 3""", (now(),))
+        return {"applications": applications, "referrals": referrals}
+
     def outreach(self, item_id):
         row = self.one(OUTREACH_SELECT + " WHERE o.id=?", (item_id,))
         if row:

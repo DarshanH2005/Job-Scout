@@ -268,6 +268,10 @@ def create_app(db_path=None, seed=True):
     async def companies():
         return store.all("SELECT * FROM companies ORDER BY name COLLATE NOCASE")
 
+    @app.get("/api/next-actions")
+    async def next_actions(today: date):
+        return store.next_actions(today.isoformat())
+
     def save_company(data, company_id=None):
         if scanner.running:
             fail("The current scan needs to finish before editing the watchlist.", 409)

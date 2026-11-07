@@ -473,6 +473,31 @@ def test_application_targets_prioritize_outstanding_saved_jobs(desk):
     assert cleared["application_target"] is None and cleared["saved"] and cleared["deadline_at"]
 
 
+def test_next_actions_include_due_targets_and_actionable_referrals(desk):
+    client, store = desk
+    due = saved_job(client)
+    future = result(client.post("/api/jobs", json={
+        "company": due["company"], "title": "Software Engineer, Intern", "url": "https://sample.example/intern",
+    }), 201)
+    result(client.patch(f"/api/jobs/{due['id']}", json={"application_target": "2026-11-06"}))
+    result(client.patch(f"/api/jobs/{future['id']}", json={"application_target": "2026-11-10"}))
+    waiting = action(client, create_draft(client, due), "sent")
+    store.write("UPDATE outreach SET due_at='2000-01-01T00:00:00+00:00' WHERE id=?", (waiting["id"],))
+    draft = create_draft(client, future)
+    paused = action(client, create_draft(client, due, "gmail"), "sent")
+    endpoint = "/api/next-actions?today=2026-11-07"
+    actions = result(client.get(endpoint))
+    assert [row["id"] for row in actions["applications"]] == [due["id"]]
+    assert [row["id"] for row in actions["referrals"]] == [waiting["id"], draft["id"]]
+    assert all("draft" not in row for row in actions["referrals"])
+    assert result(client.get(f"/api/outreach/{paused['id']}"))["state"] == "waiting"
+    result(client.patch(f"/api/jobs/{due['id']}", json={"applied": True}))
+    action(client, waiting, "closed")
+    after = result(client.get(endpoint))
+    assert after["applications"] == []
+    assert [row["id"] for row in after["referrals"]] == [draft["id"]]
+
+
 def test_verify_posting_distinguishes_presence_absence_and_feed_failure(desk, monkeypatch):
     client, _ = desk
     register(client)
