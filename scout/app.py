@@ -124,16 +124,25 @@ class Scanner:
     def running(self):
         return self.task is not None and not self.task.done()
 
-    def start(self):
+    def start(self, scope="full"):
         if self.running:
+            if scope == "retry":
+                fail("A scan is already running.", 409)
             return self.store.one("SELECT * FROM scans ORDER BY id DESC LIMIT 1")
-        companies = self.store.all("SELECT * FROM companies WHERE enabled=1 ORDER BY id")
-        scan_id = self.store.write("INSERT INTO scans(started_at,state,total) VALUES(?,?,?)",
-                                   (now(), "running", len(companies)))
-        self.task = asyncio.create_task(self.run(scan_id, companies))
+        query = "SELECT * FROM companies WHERE enabled=1"
+        if scope == "retry":
+            query += " AND status='failed' AND provider<>''"
+        companies = self.store.all(query + " ORDER BY id")
+        if scope == "retry" and not companies:
+            fail("There are no failed feeds to retry.", 409)
+        scan_id = self.store.write("INSERT INTO scans(started_at,state,scope,total) VALUES(?,?,?,?)",
+                                   (now(), "running", scope, len(companies)))
+        full = self.store.last_full_scan() if scope == "retry" else None
+        baseline_id = scan_id if scope == "full" else full and full["id"]
+        self.task = asyncio.create_task(self.run(scan_id, companies, baseline_id))
         return self.store.one("SELECT * FROM scans WHERE id=?", (scan_id,))
 
-    async def run(self, scan_id, companies):
+    async def run(self, scan_id, companies, baseline_id):
         limits = {provider: asyncio.Semaphore(4) for provider in PROVIDERS}
         unsupported = len([row for row in companies if row["provider"] not in PROVIDERS])
         self.store.write("UPDATE scans SET unsupported=? WHERE id=?", (unsupported, scan_id))
@@ -142,7 +151,7 @@ class Scanner:
             async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
                 async def check(company):
                     jobs, error = await fetch_board(client, company, limits[company["provider"]])
-                    self.store.finish_source(scan_id, company, jobs, error)
+                    self.store.finish_source(scan_id, company, jobs, error, baseline_id)
                 await asyncio.gather(*(check(row) for row in companies if row["provider"] in PROVIDERS))
         except asyncio.CancelledError:
             state, note = "interrupted", "The app closed before the scan finished."
@@ -216,6 +225,7 @@ def create_app(db_path=None, seed=True):
     async def state():
         account = store.setting("gmail_account")
         return {"stats": store.stats(), "scan": store.one("SELECT * FROM scans ORDER BY id DESC LIMIT 1"),
+                "full_scan": store.last_full_scan(),
                 "search_configured": bool(credentials.brave_key()),
                 "search_from_env": bool(os.getenv("SCOUT_BRAVE_KEY")),
                 "rewrite_configured": bool(os.getenv("SCOUT_OPENAI_KEY") and os.getenv("SCOUT_OPENAI_MODEL")),
@@ -248,6 +258,10 @@ def create_app(db_path=None, seed=True):
     @app.post("/api/scans", status_code=202)
     async def scan():
         return scanner.start()
+
+    @app.post("/api/scans/retry-failed", status_code=202)
+    async def retry_failed():
+        return scanner.start("retry")
 
     @app.get("/api/companies")
     async def companies():

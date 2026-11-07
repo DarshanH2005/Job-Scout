@@ -34,10 +34,12 @@ function notice(text,error=false) {
 }
 function scanStatus() {
   const {scan,stats}=S.info, running=scan?.state==="running", button=$("#scan-button");
+  const retry=scan?.scope==="retry";
+  const checked=`${num(scan?.checked)} ${scan?.checked===1?"feed":"feeds"}`;
   button.disabled=running;
-  button.innerHTML=running?"<span aria-hidden='true'>↻</span> Scanning…":"<span aria-hidden='true'>↻</span> Find latest jobs";
-  $("#scan-progress").textContent=running ? `${num(scan.checked+scan.failed+scan.unsupported)} of ${num(scan.total)} sources accounted for`
-    : scan?.state==="completed" ? `Last scan ${date(scan.finished_at,true)} · ${scan.checked} feeds checked · ${scan.failed} failed${scan.fresh ? ` · ${num(scan.fresh)} new matches` : ""}`
+  button.innerHTML=running?`<span aria-hidden='true'>↻</span> ${retry?"Retrying feeds…":"Scanning…"}`:"<span aria-hidden='true'>↻</span> Find latest jobs";
+  $("#scan-progress").textContent=running ? `${num(scan.checked+scan.failed+scan.unsupported)} of ${num(scan.total)} ${retry?"failed feeds retried":"sources accounted for"}`
+    : scan?.state==="completed" ? `${retry?"Last retry":"Last scan"} ${date(scan.finished_at,true)} · ${checked} ${retry?"recovered":"checked"} · ${scan.failed} failed${scan.fresh ? ` · ${num(scan.fresh)} new matches` : ""}`
     : scan ? scan.note||"Previous scan interrupted." : `${num(stats.configured)} feeds ready · no scan yet`;
   $("#nav-due").hidden=!stats.due;
   $("#nav-due").textContent=stats.due;
@@ -53,33 +55,39 @@ function pollScan() {
         if ($("#coverage-panel")) $("#coverage-panel").innerHTML=coverage();
       } else {
         await render();
-        notice(S.info.scan.state==="completed"?"Scan complete. Your shortlist is ready.":"The scan stopped early.",S.info.scan.state!=="completed");
+        const finished=S.info.scan;
+        notice(finished.state!=="completed"?"The scan stopped early.":finished.scope==="retry"?"Failed-feed retry complete.":"Scan complete. Your shortlist is ready.",finished.state!=="completed");
       }
     } catch(error) {notice(error.message,true);}
     pollScan();
   },900);
 }
-async function startScan() {
-  S.latest=false;
-  if ($("#latest")) $("#latest").checked=false;
-  S.info.scan=await api("/scans","POST");
+async function startScan(scope="full") {
+  if(scope==="full") {
+    S.latest=false;
+    if ($("#latest")) $("#latest").checked=false;
+  }
+  S.info.scan=await api(scope==="retry"?"/scans/retry-failed":"/scans","POST");
+  if ($("#coverage-panel")) $("#coverage-panel").innerHTML=coverage();
   if(S.page!=="jobs") location.hash="jobs";
   scanStatus(); pollScan();
 }
 function coverage() {
-  const {stats,scan}=S.info;
+  const {stats,scan,full_scan}=S.info;
+  const full=scan?.scope==="full"&&scan.state==="running"?scan:full_scan;
   return `<p class="eyebrow">SOURCE STATUS</p><h3>Scan coverage</h3><div class="coverage">
     <div>Company watchlist <strong>${num(stats.companies)}</strong></div>
     <div>Feeds configured <strong>${num(stats.configured)}</strong></div>
-    <div>Checked in last scan <strong>${scan?num(scan.checked):"—"}</strong></div>
-    <div>Feed failures <strong>${scan?num(scan.failed):"—"}</strong></div>
-    <div>Manual sources <strong>${scan?num(scan.unsupported):"—"}</strong></div>
-    </div><a href="#watchlist">View employer watchlist →</a>`;
+    <div>Checked in full scan <strong>${full?num(full.checked):"—"}</strong></div>
+    <div>Feeds currently failing <strong>${num(stats.failed_feeds)}</strong></div>
+    <div>Manual sources in full scan <strong>${full?num(full.unsupported):"—"}</strong></div>
+    </div>${stats.failed_feeds&&scan?.state!=="running"?`<div class="actions">${B("Retry failed feeds","retry-feeds","","small")}</div>`:""}
+    <a href="#watchlist">View employer watchlist →</a>`;
 }
 function jobRow(job) {
   const mark=job.company.split(/\s+/).slice(0,2).map(w=>w[0]).join("");
   const freshness=job.archived?tag("No longer on feed","warn"):job.source_status==="failed"?tag("Source stale","warn"):
-    job.new_scan&&job.new_scan===S.info.scan?.id?tag("New since last scan","good"):"";
+    job.new_scan&&job.new_scan===S.info.full_scan?.id?tag("New since last scan","good"):"";
   return `<article class="panel job-row"><div class="job-mark" aria-hidden="true">${E(mark)}</div>
     <div><div class="job-company">${E(job.company)} · ${job.posted_at?"Posted":"First seen"} ${date(job.posted_at||job.first_seen)}</div>
     <button class="job-title" data-action="job" data-id="${job.id}">${E(job.title)}</button>
@@ -349,7 +357,7 @@ async function copy(text) {
 async function act(action,id) {
   if(action.startsWith("event-")) return eventAction(id,action.slice(6));
   const handlers={
-    close:()=>modal.close(), command:commands, import:jobImport, scan:startScan, company:()=>employer(Number(id)), job:()=>openJob(id),
+    close:()=>modal.close(), command:commands, import:jobImport, scan:startScan, "retry-feeds":()=>startScan("retry"), company:()=>employer(Number(id)), job:()=>openJob(id),
     prev:()=>{S.offset=Math.max(0,S.offset-30);return refreshJobs();},
     next:()=>{S.offset+=30;return refreshJobs();},
     "toggle-hidden":()=>{S.hidden=!S.hidden;S.offset=0;return render();},

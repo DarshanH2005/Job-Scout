@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS companies (
 );
 CREATE TABLE IF NOT EXISTS scans (
     id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
-    state TEXT NOT NULL, total INTEGER NOT NULL, checked INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'full', total INTEGER NOT NULL, checked INTEGER NOT NULL DEFAULT 0,
     failed INTEGER NOT NULL DEFAULT 0, unsupported INTEGER NOT NULL DEFAULT 0,
     fresh INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT ''
 );
@@ -99,6 +99,8 @@ class Store:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
             conn.execute("BEGIN IMMEDIATE")
+            if not any(row["name"] == "scope" for row in conn.execute("PRAGMA table_info(scans)")):
+                conn.execute("ALTER TABLE scans ADD COLUMN scope TEXT NOT NULL DEFAULT 'full'")
             if not any(row["name"] == "hidden" for row in conn.execute("PRAGMA table_info(jobs)")):
                 conn.execute("ALTER TABLE jobs ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
             if not any(row["name"] == "follow_up_draft" for row in conn.execute("PRAGMA table_info(outreach)")):
@@ -150,6 +152,7 @@ class Store:
             SELECT
             (SELECT COUNT(*) FROM companies) AS companies,
             (SELECT COUNT(*) FROM companies WHERE enabled AND provider<>'') AS configured,
+            (SELECT COUNT(*) FROM companies WHERE enabled AND provider<>'' AND status='failed') AS failed_feeds,
             (SELECT COUNT(*) FROM jobs j JOIN companies c ON c.id=j.company_id
               WHERE j.archived=0 AND j.hidden=0 AND j.score>0 AND (c.enabled=1 OR j.manual=1)) AS matches,
             (SELECT COUNT(*) FROM jobs WHERE saved=1 OR applied_at IS NOT NULL) AS saved,
@@ -157,7 +160,10 @@ class Store:
             (SELECT COUNT(*) FROM outreach WHERE state='waiting' AND due_at<=?) AS due
         """, (now(),))
 
-    def finish_source(self, scan_id, company, jobs, error):
+    def last_full_scan(self):
+        return self.one("SELECT * FROM scans WHERE scope='full' AND state='completed' ORDER BY id DESC LIMIT 1")
+
+    def finish_source(self, scan_id, company, jobs, error, baseline_id):
         checked_at = now()
         company_id = company["id"]
         with self.connect() as conn:
@@ -169,10 +175,10 @@ class Store:
             conn.execute("UPDATE companies SET status='checked', note=?, checked_at=?, successful_at=? WHERE id=?",
                          (f"{len(jobs)} published openings", checked_at, checked_at, company_id))
             fresh = 0
+            new_scan = baseline_id if company["successful_at"] else None
             for job in jobs:
-                _, inserted = self.upsert_job(conn, company_id, job, checked_at,
-                                                   scan_id if company["successful_at"] else None)
-                fresh += bool(inserted and company["successful_at"] and job["score"])
+                _, inserted = self.upsert_job(conn, company_id, job, checked_at, new_scan)
+                fresh += bool(inserted and new_scan and job["score"])
             # Two successful snapshots must agree before a posting disappears.
             conn.execute("""UPDATE jobs SET misses=misses+1, archived=CASE WHEN misses>=1 THEN 1 ELSE archived END
                             WHERE company_id=? AND manual=0 AND last_seen<>? AND archived=0""",
@@ -212,7 +218,7 @@ class Store:
             elif not all_levels:
                 clauses.append("(j.score>0 OR j.manual=1)")
             if latest:
-                clauses.append("j.new_scan=(SELECT MAX(id) FROM scans WHERE state='completed')")
+                clauses.append("j.new_scan=(SELECT MAX(id) FROM scans WHERE scope='full' AND state='completed')")
             if recent_days:
                 clauses.append("coalesce(julianday(j.posted_at),julianday(j.first_seen))>=julianday('now')-?")
                 args.append(recent_days)

@@ -31,8 +31,8 @@ def register(client, **overrides):
     }), 201)
 
 
-def scan(client):
-    result(client.post("/api/scans"), 202)
+def scan(client, path="/api/scans"):
+    result(client.post(path), 202)
     for _ in range(100):
         progress = result(client.get("/api/state"))["scan"]
         if progress["state"] != "running":
@@ -92,6 +92,41 @@ def test_new_jobs_failure_recovery_and_source_coverage(desk, monkeypatch):
     assert len(result(client.get("/api/jobs"))["items"]) == 2
     assert scan(client)["checked"] == 1
     assert result(client.get("/api/jobs"))["items"] == []
+
+
+def test_retry_checks_only_failed_feeds_and_keeps_full_baseline(desk, monkeypatch):
+    client, _ = desk
+    register(client)
+    register(client, name="Healthy Company", board="healthy")
+    calls = []
+    retry_mode = False
+    fail_sample = False
+
+    async def fetch(_client, company, _limit):
+        calls.append(company["board"])
+        if company["board"] == "sample":
+            if fail_sample:
+                return [], "HTTP 503"
+            return [sample(), sample("25")] if retry_mode else [sample()], None
+        return [sample("44"), sample("45")] if fail_sample else [sample("44")], None
+
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    scan(client)
+    assert client.post("/api/scans/retry-failed").status_code == 409
+    fail_sample = True
+    full = scan(client)
+    assert full["failed"] == 1 and full["checked"] == 1
+    assert result(client.get("/api/state"))["stats"]["failed_feeds"] == 1
+    calls.clear()
+    fail_sample, retry_mode = False, True
+    retry = scan(client, "/api/scans/retry-failed")
+    assert calls == ["sample"]
+    assert retry["scope"] == "retry" and retry["total"] == retry["checked"] == 1
+    state = result(client.get("/api/state"))
+    assert state["full_scan"]["id"] == full["id"] and state["stats"]["failed_feeds"] == 0
+    recent = result(client.get("/api/jobs?latest=true"))["items"]
+    assert {row["company"] for row in recent} == {"Sample Company", "Healthy Company"}
+    assert all(row["new_scan"] == full["id"] for row in recent)
 
 
 def test_saved_link_draft_and_independent_application(desk):
@@ -318,6 +353,8 @@ def test_schema_migration_keeps_existing_conversations_and_jobs(desk):
         conn.execute("ALTER TABLE outreach DROP COLUMN follow_up_draft")
         conn.execute("ALTER TABLE outreach DROP COLUMN conversation_url")
         conn.execute("ALTER TABLE jobs DROP COLUMN hidden")
+        conn.execute("ALTER TABLE scans DROP COLUMN scope")
+        conn.execute("INSERT INTO scans(started_at,state,total) VALUES('2026-01-01','completed',0)")
     store.initialize(seed=False)
     store.initialize(seed=False)
     existing = store.outreach(item["id"])
@@ -326,6 +363,7 @@ def test_schema_migration_keeps_existing_conversations_and_jobs(desk):
     assert existing["conversation_url"] == ""
     assert existing["events"][0]["kind"] == "sent"
     assert store.job(item["job_id"])["hidden"] == 0
+    assert store.last_full_scan()["scope"] == "full"
 
 
 def test_hidden_job_survives_scan_without_losing_saved_application_or_referral(desk, monkeypatch):
