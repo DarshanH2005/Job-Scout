@@ -72,6 +72,10 @@ class Gmail:
     async def _exchange(self, data):
         async with httpx.AsyncClient(timeout=12) as client:
             response = await client.post(TOKEN, data={**google_client(), **data})
+            if (data["grant_type"] == "refresh_token" and response.status_code == 400
+                    and response.headers.get("content-type", "").startswith("application/json")
+                    and response.json().get("error") == "invalid_grant"):
+                raise ValueError("Gmail authorization expired or was revoked. Select Reconnect Gmail in Settings.")
             response.raise_for_status()
         result = response.json()
         result["expires_at"] = time.time() + result.get("expires_in", 3600) - 60

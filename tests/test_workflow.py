@@ -145,6 +145,31 @@ def test_gmail_sending_scope_is_opt_in(desk, monkeypatch):
         assert parse_qs(urlsplit(url).query)["scope"][0].split() == scopes
 
 
+def test_expired_gmail_authorization_surfaces_reconnect_in_settings(desk, monkeypatch):
+    from types import SimpleNamespace
+
+    client, store = desk
+    store.set_setting("gmail_account", "me@example.com")
+    store.set_setting("gmail_send_enabled", "1")
+    vault = SimpleNamespace(get_password=lambda *_: '{"expires_at": 0, "refresh_token": "test"}')
+    monkeypatch.setattr(Gmail, "_vault", staticmethod(lambda: vault))
+    monkeypatch.setattr("scout.gmail.google_client", lambda: {"client_id": "test"})
+
+    def token_expired(request):
+        assert request.url.host == "oauth2.googleapis.com"
+        assert b"grant_type=refresh_token" in request.content
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    http_client = httpx.AsyncClient
+    monkeypatch.setattr("scout.gmail.httpx.AsyncClient",
+                        lambda **kwargs: http_client(transport=httpx.MockTransport(token_expired), **kwargs))
+    message = result(client.post("/api/gmail/check"), 502)["detail"]
+    assert "Reconnect Gmail" in message
+    mail = result(client.get("/api/state"))["mail"]
+    assert mail["issue"] == message
+    assert mail["send_enabled"]
+
+
 def test_new_jobs_failure_recovery_and_source_coverage(desk, monkeypatch):
     client, store = desk
     register(client)

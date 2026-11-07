@@ -203,7 +203,8 @@ function settings() {
     ${tag(rewrite_configured?"Rewrite available":"Templates active","good")}<p class="section">Optional settings <code>SCOUT_OPENAI_KEY</code> and <code>SCOUT_OPENAI_MODEL</code>.</p></section>
     <section class="panel padded"><h3>Gmail sending and reply checks</h3><p>Send from a referral in Job Scout and track replies to that thread. Job Scout checks linked message headers every ten minutes while the app runs.</p>
     ${mail.account?`<p><strong>${E(mail.account)}</strong><br>Last check ${date(mail.checked_at,true)}</p>
-    <div class="actions">${mail.send_enabled?tag("Direct sending enabled","good"):B("Enable Gmail sending","mail-connect-send","","small")}${B("Check Gmail","mail-check","","small")}${B("Disconnect","mail-disconnect","","small danger")}</div>
+    <div class="actions">${mail.send_enabled?tag("Direct sending enabled","good"):B("Enable Gmail sending","mail-connect-send","","small")}
+    ${B("Reconnect Gmail",mail.send_enabled?"mail-connect-send":"mail-connect","","small")}${B("Check Gmail","mail-check","","small")}${B("Disconnect","mail-disconnect","","small danger")}</div>
     <p class="section">Job Scout links threads it sends. To link a message you sent in Gmail, first apply the <strong>Job Scout</strong> label there.</p>`:
     `<p>Choose your Google Desktop OAuth client JSON. See the README for Google Cloud setup.</p>
     ${mail.configured?`<div class="actions">${B("Connect Gmail for sending and replies","mail-connect-send","","primary")}${B("Connect for replies only","mail-connect","","small")}</div>`:tag("OAuth setup needed","warn")}
