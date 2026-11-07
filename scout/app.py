@@ -67,6 +67,10 @@ class DraftText(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
 
 
+class ConversationLink(BaseModel):
+    url: str = Field(max_length=1800)
+
+
 class OutreachEvent(BaseModel):
     action: str
     note: str = Field(default="", max_length=650)
@@ -395,6 +399,15 @@ def create_app(db_path=None, seed=True):
             change = conn.execute("UPDATE outreach SET follow_up_draft=? WHERE id=? AND state='waiting'", (text, item_id))
             if not change.rowcount:
                 fail("Follow-ups are available while waiting for a reply.", 409)
+        return store.outreach(item_id)
+
+    @app.patch("/api/outreach/{item_id}/conversation-link")
+    async def save_conversation_link(item_id: int, data: ConversationLink):
+        url = required_url(data.url) if data.url.strip() else ""
+        with store.connect() as conn:
+            change = conn.execute("UPDATE outreach SET conversation_url=? WHERE id=?", (url, item_id))
+            if not change.rowcount:
+                fail("Conversation not found.", 404)
         return store.outreach(item_id)
 
     @app.post("/api/outreach/{item_id}/events")

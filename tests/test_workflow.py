@@ -316,9 +316,24 @@ def test_follow_up_migration_keeps_existing_conversations(desk):
     with store.connect() as conn:
         conn.execute("ALTER TABLE events DROP COLUMN message")
         conn.execute("ALTER TABLE outreach DROP COLUMN follow_up_draft")
+        conn.execute("ALTER TABLE outreach DROP COLUMN conversation_url")
     store.initialize(seed=False)
     store.initialize(seed=False)
     existing = store.outreach(item["id"])
     assert existing["state"] == "waiting" and existing["draft"] == item["draft"]
     assert existing["follow_up_draft"] == ""
+    assert existing["conversation_url"] == ""
     assert existing["events"][0]["kind"] == "sent"
+
+
+def test_conversation_link_is_separate_from_contact_source_and_draft(desk):
+    client, _ = desk
+    item = create_draft(client, saved_job(client))
+    path = f"/api/outreach/{item['id']}"
+    assert client.patch(path + "/conversation-link", json={"url": "javascript:alert(1)"}).status_code == 400
+    thread = "https://www.linkedin.com/messaging/thread/example/"
+    linked = result(client.patch(path + "/conversation-link", json={"url": thread}))
+    assert linked["conversation_url"] == thread and linked["source"] == item["source"]
+    assert linked["draft"] == item["draft"] and linked["state"] == "draft" and linked["events"] == []
+    assert result(client.get(path))["conversation_url"] == thread
+    assert result(client.patch(path + "/conversation-link", json={"url": ""}))["conversation_url"] == ""

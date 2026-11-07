@@ -261,19 +261,36 @@ function followUpText(item) {
   const first = item.person.split(/\s+/)[0];
   return `Hi ${first}, I wanted to follow up on my referral request for the ${item.job_title} role at ${item.company}. If you’re able to point me in the right direction, I’d appreciate it.\n\nThanks again!`;
 }
+function handoffLinks(item) {
+  let profile = "";
+  if (item.channel === "linkedin" && item.source && URL.canParse(item.source)) {
+    const source = new URL(item.source);
+    if (source.protocol === "https:" && (source.hostname === "linkedin.com" || source.hostname.endsWith(".linkedin.com")) && /^\/in\/[^/]+/.test(source.pathname)) profile = source.href;
+  }
+  let channel = "";
+  if (item.conversation_url) channel = L("Open conversation",item.conversation_url);
+  else if (profile) channel = L("Open LinkedIn profile",profile);
+  else if (item.channel === "linkedin") {
+    const query = encodeURIComponent(`${item.person} ${item.company}`);
+    channel = L("Find on LinkedIn",`https://www.linkedin.com/search/results/people/?keywords=${query}`);
+  } else if (item.channel === "gmail") channel = L("Open Gmail","https://mail.google.com/");
+  return channel + L("View job posting",item.job_url) +
+    (item.source && !profile && item.source !== item.conversation_url ? L("View contact source",item.source) : "");
+}
 function showConversation() {
   const i=S.item, waiting=i.state==="waiting";
   const original = i.events.find(e=>e.kind==="sent"&&e.message)?.message || i.draft;
   const event=(label,action,style="small")=>B(label,`event-${action}`,i.id,style);
   dialog(i.person,`${i.company} · ${channels[i.channel]} · ${stages[i.state]}`,`<p class="micro">${E(i.job_title)}${i.due_at?` · Next check ${date(i.due_at)}`:""}</p>
+    <div class="actions" id="handoff-links">${handoffLinks(i)}</div>
     ${i.state==="draft"?`<form class="form" data-form="message" data-id="${i.id}"><label>Editable message<textarea id="draft-text" name="text" maxlength="4000" required>${E(i.draft)}</textarea></label>
-    <div class="actions">${B("Copy message","copy-message","","primary")}<button class="button">Save edits</button>${S.info.rewrite_configured?B("AI rewrite","rewrite"):""}${i.source?L("Open contact",i.source):""}</div></form>`:
-    `<details><summary>Original request</summary><div class="description">${E(original)}</div>${!waiting&&i.source?L("Open contact",i.source):""}</details>`}
+    <div class="actions">${B("Copy message","copy-message","","primary")}<button class="button">Save edits</button>${S.info.rewrite_configured?B("AI rewrite","rewrite"):""}</div></form>`:
+    `<details><summary>Original request</summary><div class="description">${E(original)}</div></details>`}
     ${waiting?`<section class="section"><p class="eyebrow">FOLLOW-UP</p>
     <form class="form" data-form="follow-up" data-id="${i.id}">
       <label>Follow-up draft<textarea id="follow-up-text" name="text" maxlength="4000" required>${E(i.follow_up_draft || followUpText(i))}</textarea></label>
       <p class="hint">Send it in the original conversation, then record the send here.</p>
-      <div class="actions">${B("Copy follow-up","copy-follow-up","","primary")}<button class="button">Save draft</button>${i.source?L("Open contact",i.source):""}
+      <div class="actions">${B("Copy follow-up","copy-follow-up","","primary")}<button class="button">Save draft</button>
       ${event("Record follow-up sent","followed_up","")}</div>
     </form></section>`:""}
     <section class="section"><p class="eyebrow">CONVERSATION ACTIONS</p><div class="actions">
@@ -284,6 +301,11 @@ function showConversation() {
     ${!["closed","submitted"].includes(i.state)?event("Close conversation","closed"):""}</div>
     <div id="gmail-link">${i.channel==="gmail"&&waiting&&S.info.mail.account?(i.thread_id?'<p class="hint">Gmail thread linked.</p>':B("Link Gmail thread","mail-threads",i.id)):""}</div>
     <label class="form">Optional event note<input id="event-note" maxlength="650" placeholder="What did they say or what’s next?"></label></section>
+    <details class="section"><summary id="link-settings-title">${i.conversation_url?"Edit conversation link":"Add conversation link"}</summary>
+      <form class="form" data-form="conversation-link" data-id="${i.id}"><label>Conversation URL
+      <input name="url" type="url" maxlength="1800" value="${E(i.conversation_url)}" placeholder="Paste the original message thread URL"></label>
+      <p class="hint">Use this to reopen the same conversation for reply checks. Clear the field to remove the saved link.</p>
+      <div><button class="button small">Save conversation link</button></div></form></details>
     <section><p class="eyebrow">HISTORY</p><ul class="timeline">${i.events.length?i.events.map(e=>`<li><strong>${E(historyLabels[e.kind]||e.kind)}</strong> · ${date(e.at,true)}${e.note?`<br>${E(e.note)}`:""}${e.kind==="followed_up"&&e.message?`<details><summary>View sent follow-up</summary><div class="description">${E(e.message)}</div></details>`:""}</li>`).join(""):"<li>Conversation prepared. Sending is recorded separately.</li>"}</ul></section>`);
 }
 async function mailThreads(id) {
@@ -397,6 +419,16 @@ document.addEventListener("submit",event=>{
       case "follow-up":
         await api(`/outreach/${id}/follow-up`,"PATCH",data);notice("Follow-up draft saved.");
         break;
+      case "conversation-link": {
+        const item = await api(`/outreach/${id}/conversation-link`,"PATCH",data);
+        if (form.isConnected && modal.open) {
+          S.item = item;
+          $("#handoff-links").innerHTML = handoffLinks(item);
+          $("#link-settings-title").textContent = item.conversation_url ? "Edit conversation link" : "Add conversation link";
+        }
+        notice("Conversation link updated.");
+        break;
+      }
       case "thread":
         await api(`/outreach/${id}/gmail`,"POST",data);await openConversation(id);notice("Gmail thread linked.");
         break;

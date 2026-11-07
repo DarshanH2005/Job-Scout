@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS contacts (
 CREATE TABLE IF NOT EXISTS outreach (
     id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id),
     contact_id INTEGER NOT NULL REFERENCES contacts(id), channel TEXT NOT NULL,
-    draft TEXT NOT NULL, follow_up_draft TEXT NOT NULL DEFAULT '',
+    draft TEXT NOT NULL, follow_up_draft TEXT NOT NULL DEFAULT '', conversation_url TEXT NOT NULL DEFAULT '',
     state TEXT NOT NULL DEFAULT 'draft', created_at TEXT NOT NULL,
     sent_at TEXT, due_at TEXT, checked_at TEXT, thread_id TEXT UNIQUE, mail_account TEXT, mail_anchor INTEGER, mail_peer TEXT,
     UNIQUE(job_id, contact_id, channel)
@@ -100,6 +100,8 @@ class Store:
             conn.execute("BEGIN IMMEDIATE")
             if not any(row["name"] == "follow_up_draft" for row in conn.execute("PRAGMA table_info(outreach)")):
                 conn.execute("ALTER TABLE outreach ADD COLUMN follow_up_draft TEXT NOT NULL DEFAULT ''")
+            if not any(row["name"] == "conversation_url" for row in conn.execute("PRAGMA table_info(outreach)")):
+                conn.execute("ALTER TABLE outreach ADD COLUMN conversation_url TEXT NOT NULL DEFAULT ''")
             if not any(row["name"] == "message" for row in conn.execute("PRAGMA table_info(events)")):
                 conn.execute("ALTER TABLE events ADD COLUMN message TEXT NOT NULL DEFAULT ''")
             conn.execute("UPDATE scans SET state='interrupted', finished_at=? WHERE state='running'", (now(),))
