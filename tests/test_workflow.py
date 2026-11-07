@@ -354,6 +354,8 @@ def test_schema_migration_keeps_existing_conversations_and_jobs(desk):
         conn.execute("ALTER TABLE events DROP COLUMN message")
         conn.execute("ALTER TABLE outreach DROP COLUMN follow_up_draft")
         conn.execute("ALTER TABLE outreach DROP COLUMN conversation_url")
+        conn.execute("ALTER TABLE contacts DROP COLUMN profile_url")
+        conn.execute("ALTER TABLE contacts DROP COLUMN email")
         conn.execute("ALTER TABLE jobs DROP COLUMN hidden")
         conn.execute("ALTER TABLE jobs DROP COLUMN deadline_at")
         conn.execute("ALTER TABLE jobs DROP COLUMN application_target")
@@ -365,6 +367,7 @@ def test_schema_migration_keeps_existing_conversations_and_jobs(desk):
     assert existing["state"] == "waiting" and existing["draft"] == item["draft"]
     assert existing["follow_up_draft"] == ""
     assert existing["conversation_url"] == ""
+    assert existing["profile_url"] == "" and existing["email"] == ""
     assert existing["events"][0]["kind"] == "sent"
     assert store.job(item["job_id"])["hidden"] == 0
     assert store.job(item["job_id"])["application_target"] is None
@@ -409,6 +412,20 @@ def test_conversation_link_is_separate_from_contact_source_and_draft(desk):
     assert linked["draft"] == item["draft"] and linked["state"] == "draft" and linked["events"] == []
     assert result(client.get(path))["conversation_url"] == thread
     assert result(client.patch(path + "/conversation-link", json={"url": ""}))["conversation_url"] == ""
+
+
+def test_contact_handoff_keeps_source_and_send_state(desk):
+    client, _ = desk
+    item = create_draft(client, saved_job(client))
+    path = f"/api/outreach/{item['id']}/contact-handoff"
+    assert client.patch(path, json={"profile_url": "https://linkedin.com.example/in/jane"}).status_code == 400
+    assert client.patch(path, json={"email": "jane@example.com,bob@example.com"}).status_code == 400
+    link = "https://www.linkedin.com/in/jane-example/"
+    assert result(client.patch(path, json={"profile_url": link}))["profile_url"] == link
+    saved = result(client.patch(path, json={"email": "jane+job@example.com"}))
+    assert saved["email"] == "jane+job@example.com" and saved["profile_url"] == link
+    assert saved["source"] == item["source"] and saved["draft"] == item["draft"]
+    assert saved["state"] == "draft" and saved["events"] == []
 
 
 def test_job_detail_lists_only_its_referrals(desk):

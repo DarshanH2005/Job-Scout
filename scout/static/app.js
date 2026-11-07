@@ -339,8 +339,9 @@ function followUpText(item) {
 }
 function handoffLinks(item) {
   let profile = "";
-  if (item.channel === "linkedin" && item.source && URL.canParse(item.source)) {
-    const source = new URL(item.source);
+  const candidate=item.profile_url||item.source;
+  if (item.channel === "linkedin" && candidate && URL.canParse(candidate)) {
+    const source = new URL(candidate);
     if (source.protocol === "https:" && (source.hostname === "linkedin.com" || source.hostname.endsWith(".linkedin.com")) && /^\/in\/[^/]+/.test(source.pathname)) profile = source.href;
   }
   let channel = "";
@@ -349,9 +350,14 @@ function handoffLinks(item) {
   else if (item.channel === "linkedin") {
     const query = encodeURIComponent(`${item.person} ${item.company}`);
     channel = L("Find on LinkedIn",`https://www.linkedin.com/search/results/people/?keywords=${query}`);
-  } else if (item.channel === "gmail") channel = L("Open Gmail","https://mail.google.com/");
+  } else if (item.channel === "gmail") {
+    const compose=new URL("https://mail.google.com/mail/");
+    compose.search=new URLSearchParams({view:"cm",fs:"1",su:`Referral request for ${item.job_title}`});
+    if(item.email) compose.searchParams.set("to",item.email);
+    channel=L("Open Gmail compose",compose.href);
+  }
   return channel + L("View job posting",item.job_url) +
-    (item.source && !profile && item.source !== item.conversation_url ? L("View contact source",item.source) : "");
+    (item.source && item.source !== profile && item.source !== item.conversation_url ? L("View contact source",item.source) : "");
 }
 function showConversation() {
   const i=S.item, waiting=i.state==="waiting";
@@ -360,6 +366,12 @@ function showConversation() {
   dialog(i.person,`${i.company} · ${channels[i.channel]} · ${stages[i.state]}`,`<p class="micro">${E(i.job_title)}${i.due_at?` · Next check ${date(i.due_at)}`:""}</p>
     ${S.returnJob?`<div class="actions">${B("Back to job","job",S.returnJob,"small")}</div>`:""}
     <div class="actions" id="handoff-links">${handoffLinks(i)}</div>
+    ${["linkedin","gmail"].includes(i.channel)?`<details class="section"><summary>Edit ${i.channel==="linkedin"?"LinkedIn profile":"Gmail recipient"}</summary>
+      <form class="form" data-form="contact-handoff" data-id="${i.id}">
+        ${i.channel==="linkedin"?`<label>LinkedIn profile URL<input name="profile_url" type="url" maxlength="1800" value="${E(i.profile_url)}"></label>`:
+        `<label>Recipient email<input name="email" type="email" maxlength="254" value="${E(i.email)}"></label>
+          <span class="hint">Gmail opens with the recipient and subject. Copy your message here and paste it into Gmail before sending.</span>`}
+        <div><button class="button small">Save contact handoff</button></div></form></details>`:""}
     ${i.state==="draft"?`<form class="form" data-form="message" data-id="${i.id}"><label>Editable message<textarea id="draft-text" name="text" maxlength="4000" required>${E(i.draft)}</textarea></label>
     <div class="actions">${B("Copy message","copy-message","","primary")}<button class="button">Save edits</button>${S.info.rewrite_configured?B("AI rewrite","rewrite"):""}</div></form>`:
     `<details><summary>Original request</summary><div class="description">${E(original)}</div></details>`}
@@ -513,6 +525,15 @@ document.addEventListener("submit",event=>{
           $("#link-settings-title").textContent = item.conversation_url ? "Edit conversation link" : "Add conversation link";
         }
         notice("Conversation link updated.");
+        break;
+      }
+      case "contact-handoff": {
+        const item=await api(`/outreach/${id}/contact-handoff`,"PATCH",data);
+        if(form.isConnected&&modal.open) {
+          S.item=item;
+          $("#handoff-links").innerHTML=handoffLinks(item);
+        }
+        notice("Contact handoff saved.");
         break;
       }
       case "application-target": {

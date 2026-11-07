@@ -8,6 +8,7 @@ import sqlite3
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from dotenv import load_dotenv
@@ -71,6 +72,11 @@ class DraftText(BaseModel):
 
 class ConversationLink(BaseModel):
     url: str = Field(max_length=1800)
+
+
+class ContactHandoff(BaseModel):
+    profile_url: str | None = Field(default=None, max_length=1800)
+    email: str | None = Field(default=None, max_length=254)
 
 
 class OutreachEvent(BaseModel):
@@ -449,6 +455,26 @@ def create_app(db_path=None, seed=True):
             change = conn.execute("UPDATE outreach SET conversation_url=? WHERE id=?", (url, item_id))
             if not change.rowcount:
                 fail("Conversation not found.", 404)
+        return store.outreach(item_id)
+
+    @app.patch("/api/outreach/{item_id}/contact-handoff")
+    async def save_contact_handoff(item_id: int, data: ContactHandoff):
+        item = store.outreach(item_id) or fail("Conversation not found.", 404)
+        profile = None if data.profile_url is None else data.profile_url.strip()
+        email = None if data.email is None else data.email.strip()
+        if profile:
+            required_url(profile)
+            parsed = urlsplit(profile)
+            host = parsed.hostname or ""
+            if (parsed.scheme != "https" or not (host == "linkedin.com" or host.endswith(".linkedin.com"))
+                    or not re.fullmatch(r"/in/[^/]+/?", parsed.path)):
+                fail("Enter a LinkedIn profile URL, such as https://www.linkedin.com/in/name/.")
+        if email and not re.fullmatch(r"[^\s@<>,;]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}", email):
+            fail("Enter one valid email address.")
+        store.write(
+            "UPDATE contacts SET profile_url=COALESCE(?,profile_url), email=COALESCE(?,email) WHERE id=?",
+            (profile, email, item["contact_id"]),
+        )
         return store.outreach(item_id)
 
     @app.post("/api/outreach/{item_id}/events")
