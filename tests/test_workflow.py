@@ -167,8 +167,10 @@ def test_location_evidence_and_provider_dates():
         "id": 1, "title": "Junior Software Engineer", "location": {"name": "Remote"},
         "absolute_url": "https://job-boards.greenhouse.io/sample/jobs/1",
         "updated_at": "2026-02-01", "content": "&lt;p&gt;Build API&lt;/p&gt;",
+        "application_deadline": "2026-11-30T20:00:00Z",
     })
     assert posting["posted_at"] is None
+    assert posting["deadline_at"] == "2026-11-30T20:00:00+00:00"
     assert posting["description"] == "Build API"
     assert normalize("ashby", {"id": 1, "isListed": False}) is None
     assert build_job("1", "Software Engineer", "", "India", "Remote",
@@ -353,6 +355,8 @@ def test_schema_migration_keeps_existing_conversations_and_jobs(desk):
         conn.execute("ALTER TABLE outreach DROP COLUMN follow_up_draft")
         conn.execute("ALTER TABLE outreach DROP COLUMN conversation_url")
         conn.execute("ALTER TABLE jobs DROP COLUMN hidden")
+        conn.execute("ALTER TABLE jobs DROP COLUMN deadline_at")
+        conn.execute("ALTER TABLE jobs DROP COLUMN application_target")
         conn.execute("ALTER TABLE scans DROP COLUMN scope")
         conn.execute("INSERT INTO scans(started_at,state,total) VALUES('2026-01-01','completed',0)")
     store.initialize(seed=False)
@@ -363,6 +367,8 @@ def test_schema_migration_keeps_existing_conversations_and_jobs(desk):
     assert existing["conversation_url"] == ""
     assert existing["events"][0]["kind"] == "sent"
     assert store.job(item["job_id"])["hidden"] == 0
+    assert store.job(item["job_id"])["application_target"] is None
+    assert store.job(item["job_id"])["deadline_at"] is None
     assert store.last_full_scan()["scope"] == "full"
 
 
@@ -441,6 +447,30 @@ def test_job_detail_quotes_required_and_preferred_eligibility(desk):
         {"label": "Required", "text": minimum}, {"label": "Preferred", "text": preferred},
     ]
     assert eligibility_evidence("Our company has 20 years of experience.") == []
+    assert eligibility_evidence("Applications close on November 30, 2026.") == [
+        {"label": "Application deadline", "text": "Applications close on November 30, 2026."},
+    ]
+
+
+def test_application_targets_prioritize_outstanding_saved_jobs(desk):
+    client, store = desk
+    first = saved_job(client)
+    second = result(client.post("/api/jobs", json={
+        "company": first["company"], "title": "Software Engineer, Intern", "url": "https://sample.example/intern",
+    }), 201)
+    store.write("UPDATE jobs SET saved=0,deadline_at='2026-11-30' WHERE id=?", (first["id"],))
+    first_path = f"/api/jobs/{first['id']}"
+    second_path = f"/api/jobs/{second['id']}"
+    target = result(client.patch(first_path, json={"application_target": "2026-11-12"}))
+    assert target["saved"] and target["deadline_at"] == "2026-11-30"
+    assert target["application_target"] == "2026-11-12"
+    result(client.patch(second_path, json={"application_target": "2026-11-10"}))
+    saved = "/api/jobs?view=saved"
+    assert [job["id"] for job in result(client.get(saved))["items"]] == [second["id"], first["id"]]
+    result(client.patch(second_path, json={"applied": True}))
+    assert [job["id"] for job in result(client.get(saved))["items"]] == [first["id"], second["id"]]
+    cleared = result(client.patch(first_path, json={"application_target": None}))
+    assert cleared["application_target"] is None and cleared["saved"] and cleared["deadline_at"]
 
 
 def test_verify_posting_distinguishes_presence_absence_and_feed_failure(desk, monkeypatch):

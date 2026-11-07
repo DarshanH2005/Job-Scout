@@ -6,7 +6,7 @@ import os
 import re
 import sqlite3
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -49,6 +49,7 @@ class JobFlags(BaseModel):
     saved: bool | None = None
     applied: bool | None = None
     hidden: bool | None = None
+    application_target: date | None = None
 
 
 class ContactInput(BaseModel):
@@ -369,6 +370,10 @@ def create_app(db_path=None, seed=True):
                 conn.execute("UPDATE jobs SET saved=? WHERE id=?", (data.saved, job_id))
             if data.hidden is not None:
                 conn.execute("UPDATE jobs SET hidden=? WHERE id=?", (data.hidden, job_id))
+            if "application_target" in data.model_fields_set:
+                target = data.application_target
+                conn.execute("UPDATE jobs SET application_target=?, saved=CASE WHEN ? THEN 1 ELSE saved END WHERE id=?",
+                             (target.isoformat() if target else None, target is not None, job_id))
             if data.applied is not None:
                 if data.applied:
                     conn.execute("UPDATE jobs SET applied_at=coalesce(applied_at,?), saved=1 WHERE id=?", (now(), job_id))

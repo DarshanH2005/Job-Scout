@@ -9,7 +9,7 @@ const historyLabels = {sent:"Request sent",checked:"Checked, no reply",snoozed:"
 const E = (x = "") => String(x ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const num = x => Number(x ?? 0).toLocaleString();
 const date = (x, time=false) => {
-  const d = new Date(x);
+  const d = new Date(typeof x==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(x)?`${x}T00:00:00`:x);
   return x && Number.isFinite(d.valueOf()) ? d.toLocaleDateString(undefined,{month:"short",day:"numeric",...(time?{hour:"numeric",minute:"2-digit"}:{})}) : "—";
 };
 const B = (label,action,id="",style="") => `<button type="button" class="button ${style}" data-action="${action}" data-id="${E(id)}">${E(label)}</button>`;
@@ -91,7 +91,9 @@ function jobRow(job) {
   return `<article class="panel job-row"><div class="job-mark" aria-hidden="true">${E(mark)}</div>
     <div><div class="job-company">${E(job.company)} · ${job.posted_at?"Posted":"First seen"} ${date(job.posted_at||job.first_seen)}</div>
     <button class="job-title" data-action="job" data-id="${job.id}">${E(job.title)}</button>
-    <div class="meta">${tag(regions[job.region],job.region.startsWith("india")?"good":"")}${freshness}${job.hidden?tag("Hidden from feed"):""}${job.applied_at?tag("Applied","good"):""}</div>
+    <div class="meta">${tag(regions[job.region],job.region.startsWith("india")?"good":"")}${freshness}${job.hidden?tag("Hidden from feed"):""}${job.applied_at?tag("Applied","good"):""}
+    ${!job.applied_at&&job.application_target?tag(`Your target ${date(job.application_target)}`,"good"):""}
+    ${!job.applied_at&&job.deadline_at?tag(`Employer deadline ${date(job.deadline_at)}`,"warn"):""}</div>
     <div class="micro">${E(job.reason)}</div></div><div class="actions">${B("Review","job",job.id,"small")}${L("Apply",job.apply_url)}</div></article>`;
 }
 async function refreshJobs() {
@@ -240,6 +242,13 @@ function showJob() {
     <div class="actions">${B("Check this posting","verify-job",job.id,"small")}
       <span class="micro" id="listing-check-result" role="status"></span></div>
     <p class="micro">${job.posted_at?`Employer posted ${date(job.posted_at)} · `:""}First seen ${date(job.first_seen)}${job.archived?" · Absent in recent scans":job.source_status==="failed"?" · Latest scan could not reach this feed":""}</p>
+    ${job.deadline_at?`<p>${tag("Employer deadline","warn")} ${date(job.deadline_at,job.deadline_at.includes("T"))}</p>`:""}
+    <details class="section" ${job.application_target?"open":""}><summary>${job.application_target?`Your target date · ${date(job.application_target)}`:"Set a target application date"}</summary>
+      <form class="form" data-form="application-target" data-id="${job.id}">
+        <label>Target application date<input name="target" type="date" value="${E(job.application_target)}"></label>
+        <span class="hint">Your target helps sort Saved jobs. Clear the date and save to remove it.</span>
+        <div><button class="button small">Save target date</button></div>
+      </form></details>
     ${job.evidence?`<div class="evidence"><strong>Location evidence</strong><br>${E(job.evidence)}</div>`:""}
     ${job.eligibility?.length?`<section class="evidence" aria-label="Eligibility evidence"><strong>Eligibility evidence</strong>
       <ul class="eligibility-list">${job.eligibility.map(item=>`<li>${tag(item.label)} <span>${E(item.text)}</span></li>`).join("")}</ul></section>`:""}
@@ -479,6 +488,13 @@ document.addEventListener("submit",event=>{
           $("#link-settings-title").textContent = item.conversation_url ? "Edit conversation link" : "Add conversation link";
         }
         notice("Conversation link updated.");
+        break;
+      }
+      case "application-target": {
+        const job=await api(`/jobs/${id}`,"PATCH",{application_target:data.target||null});
+        if(form.isConnected&&modal.open) {S.job=job;showJob();}
+        await refreshJobs();
+        notice(job.application_target?"Target date saved.":"Target date cleared.");
         break;
       }
       case "thread":

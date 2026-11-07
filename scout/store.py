@@ -28,12 +28,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id),
     external_id TEXT NOT NULL, title TEXT NOT NULL, department TEXT NOT NULL,
     location TEXT NOT NULL, description TEXT NOT NULL, url TEXT NOT NULL, apply_url TEXT NOT NULL,
-    canonical_url TEXT NOT NULL, posted_at TEXT, region TEXT NOT NULL,
+    canonical_url TEXT NOT NULL, posted_at TEXT, deadline_at TEXT, region TEXT NOT NULL,
     evidence TEXT NOT NULL, score INTEGER NOT NULL, reason TEXT NOT NULL,
     first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, new_scan INTEGER REFERENCES scans(id),
     misses INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
     manual INTEGER NOT NULL DEFAULT 0, saved INTEGER NOT NULL DEFAULT 0, applied_at TEXT,
-    hidden INTEGER NOT NULL DEFAULT 0,
+    hidden INTEGER NOT NULL DEFAULT 0, application_target TEXT,
     UNIQUE(company_id, external_id)
 );
 CREATE INDEX IF NOT EXISTS jobs_by_url ON jobs(company_id, canonical_url);
@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 JOB_FIELDS = ("external_id", "title", "department", "location", "description", "url", "apply_url",
-              "canonical_url", "posted_at", "region", "evidence", "score", "reason")
+              "canonical_url", "posted_at", "deadline_at", "region", "evidence", "score", "reason")
 OUTREACH_SELECT = """
 SELECT o.*, c.name AS person, c.source, j.title AS job_title, j.url AS job_url,
        j.applied_at, co.name AS company
@@ -101,8 +101,13 @@ class Store:
             conn.execute("BEGIN IMMEDIATE")
             if not any(row["name"] == "scope" for row in conn.execute("PRAGMA table_info(scans)")):
                 conn.execute("ALTER TABLE scans ADD COLUMN scope TEXT NOT NULL DEFAULT 'full'")
-            if not any(row["name"] == "hidden" for row in conn.execute("PRAGMA table_info(jobs)")):
+            job_columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+            if "hidden" not in job_columns:
                 conn.execute("ALTER TABLE jobs ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+            if "deadline_at" not in job_columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN deadline_at TEXT")
+            if "application_target" not in job_columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN application_target TEXT")
             if not any(row["name"] == "follow_up_draft" for row in conn.execute("PRAGMA table_info(outreach)")):
                 conn.execute("ALTER TABLE outreach ADD COLUMN follow_up_draft TEXT NOT NULL DEFAULT ''")
             if not any(row["name"] == "conversation_url" for row in conn.execute("PRAGMA table_info(outreach)")):
@@ -232,8 +237,11 @@ class Store:
         order = """CASE j.region WHEN 'india_remote' THEN 0 WHEN 'india' THEN 0 WHEN 'us_remote' THEN 2
                    WHEN 'unclear' THEN 3 ELSE 4 END, c.status='failed', j.score DESC,
                    coalesce(julianday(j.posted_at),julianday(j.first_seen)) DESC, j.id DESC"""
+        if view == "saved":
+            order = "CASE WHEN j.applied_at IS NULL THEN j.application_target END ASC NULLS LAST, " + order
         return self.all(f"""SELECT j.id,j.title,j.location,j.url,j.apply_url,j.posted_at,j.first_seen,j.last_seen,j.new_scan,
                                    j.region,j.evidence,j.reason,j.score,j.saved,j.applied_at,j.archived,j.manual,j.hidden,
+                                   j.deadline_at,j.application_target,
                                    c.name AS company,c.provider,c.status AS source_status
                             FROM jobs j JOIN companies c ON c.id=j.company_id WHERE {where}
                             ORDER BY {order} LIMIT 31 OFFSET ?""", (*args, offset))

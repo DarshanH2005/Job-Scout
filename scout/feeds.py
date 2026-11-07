@@ -3,6 +3,7 @@
 import asyncio
 import html
 import re
+from datetime import date, datetime
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 
@@ -58,6 +59,11 @@ MINIMUM_HEADING = re.compile(r"(?:minimum|basic|required) (?:requirements|qualif
 PREFERRED_HEADING = re.compile(r"preferred(?: (?:requirements|qualifications|experience|skills))?|nice to have|bonus points", re.I)
 OTHER_HEADING = re.compile(r"(?:about (?:us|the role|the team)|responsibilities|benefits|compensation|in-office expectations|what (?:you.ll do|we offer|we.re looking for)|equal opportunity)", re.I)
 COMPANY_BACKGROUND = re.compile(r"^(?:we|our (?:company|team)|the company) (?:have|has|bring|brings|offer|offers)\b", re.I)
+APPLICATION_DEADLINE = re.compile(
+    r"\b(?:application deadline|applications? clos(?:e|es)|apply by|closing date)\b[^.!?\n]{0,75}"
+    r"(?:\b20\d{2}-\d{2}-\d{2}\b|\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}\b)", re.I
+)
 
 
 class PlainText(HTMLParser):
@@ -206,11 +212,14 @@ def eligibility_evidence(description):
             excerpt = sentence.strip(" \t*•●")
             if not excerpt or len(excerpt) > 420 or excerpt in seen or COMPANY_BACKGROUND.search(excerpt):
                 continue
-            if (YEARS.search(excerpt) or EXPERIENCE_MONTHS.search(excerpt) or EDUCATION.search(excerpt)
+            if APPLICATION_DEADLINE.search(excerpt):
+                evidence.append({"label": "Application deadline", "text": excerpt})
+                seen.add(excerpt)
+            elif (YEARS.search(excerpt) or EXPERIENCE_MONTHS.search(excerpt) or EDUCATION.search(excerpt)
                     or (DEGREE.search(excerpt) and GRAD_DATE.search(excerpt))):
                 evidence.append({"label": section, "text": excerpt})
                 seen.add(excerpt)
-    priority = {"Required": 0, "From the posting": 1, "Preferred": 2}
+    priority = {"Application deadline": 0, "Required": 1, "From the posting": 2, "Preferred": 3}
     return sorted(evidence, key=lambda item: priority[item["label"]])[:4]
 
 
@@ -251,9 +260,23 @@ def normalize(provider, raw):
     if not public_url(url) or not title or raw.get("id") is None:
         return None
     job = build_job(str(raw["id"]), title, department, location, workplace, description, url, posted, raw.get("applyUrl"))
+    if provider == "greenhouse":
+        job["deadline_at"] = employer_deadline(raw.get("application_deadline"))
     if provider == "smartrecruiters" and (raw.get("experienceLevel") or {}).get("id") in {"mid_senior_level", "director", "executive"}:
         job.update(score=0, reason="")
     return job
+
+
+def employer_deadline(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        if len(value) == 10:
+            return date.fromisoformat(value).isoformat()
+        stamp = datetime.fromisoformat(value)
+        return stamp.isoformat() if stamp.tzinfo else None
+    except ValueError:
+        return None
 
 
 def build_job(external_id, title, department, location, workplace, description, url, posted=None, apply_url=None):
@@ -263,7 +286,7 @@ def build_job(external_id, title, department, location, workplace, description, 
     score, reason = assess(title, department, description, region)
     return dict(external_id=external_id, title=title[:220], department=department[:250],
                 location=location[:350], description=description, url=url, apply_url=public_url(apply_url) or url,
-                canonical_url=canonical_url(url), posted_at=posted, region=region,
+                canonical_url=canonical_url(url), posted_at=posted, deadline_at=None, region=region,
                 evidence=evidence[:500], score=score, reason=reason)
 
 
