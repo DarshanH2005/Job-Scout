@@ -172,7 +172,7 @@ async function watchlist() {
 
 function inboxRow(item) {
   return `<div class="inbox-row"><div><strong>${E(item.person)} · ${E(item.company)}</strong>
-    <span class="micro">${E(item.job_title)} · ${channels[item.channel]}${item.due_at?` · Check ${date(item.due_at)}`:""}</span></div>
+    <span class="micro">${E(item.job_title)} · ${channels[item.channel]}${item.scheduled_issue||item.gmail_send_pending?" · Check Gmail delivery":item.scheduled_send_at?` · Sends ${date(item.scheduled_send_at,true)}`:item.due_at?` · Check ${date(item.due_at)}`:""}</span></div>
     <div class="actions">${tag(stages[item.state],item.state==="submitted"?"good":"")}${B("Open","conversation",item.id,"small")}</div></div>`;
 }
 async function inbox() {
@@ -367,7 +367,7 @@ function showConversation() {
   const i=S.item, waiting=i.state==="waiting";
   const {mail}=S.info, isGmail=i.channel==="gmail";
   const sendRequest=isGmail&&mail.send_enabled&&i.email&&!i.gmail_send_pending;
-  const sendFollowUp=isGmail&&mail.send_enabled&&i.thread_id&&i.mail_account===mail.account&&!i.gmail_send_pending;
+  const sendFollowUp=isGmail&&mail.send_enabled&&i.thread_id&&i.mail_account===mail.account&&!i.gmail_send_pending&&!i.schedule_id;
   const original = i.events.find(e=>e.kind==="sent"&&e.message)?.message || i.draft;
   const event=(label,action,style="small")=>B(label,`event-${action}`,i.id,style);
   dialog(i.person,`${i.company} · ${channels[i.channel]} · ${stages[i.state]}`,`<p class="micro">${E(i.job_title)}${i.due_at?` · Next check ${date(i.due_at)}`:""}</p>
@@ -386,10 +386,17 @@ function showConversation() {
     `<details><summary>Original request</summary><div class="description">${E(original)}</div></details>`}
     ${waiting?`<section class="section"><p class="eyebrow">FOLLOW-UP</p>
     <form class="form" data-form="follow-up" data-id="${i.id}">
-      <label>Follow-up draft<textarea id="follow-up-text" name="text" maxlength="4000" required>${E(i.follow_up_draft || followUpText(i))}</textarea></label>
-      <p class="hint">${sendFollowUp?`Send to ${E(i.mail_peer)} in the original Gmail thread.`:"Send it in the original conversation, then record the send here."}</p>
-      <div class="actions">${sendFollowUp?B("Send Gmail follow-up","gmail-follow-up",i.id,"primary"):""}${B("Copy follow-up","copy-follow-up","",sendFollowUp?"":"primary")}<button class="button">Save draft</button>
+      <label>${i.schedule_id?"Scheduled message":"Follow-up draft"}<textarea id="follow-up-text" name="text" maxlength="4000" required ${i.schedule_id?"readonly":""}>${E(i.scheduled_message || i.follow_up_draft || followUpText(i))}</textarea></label>
+      ${i.schedule_id?`<p class="hint">${i.scheduled_issue||i.gmail_send_pending?"Scheduled send needs review":`Scheduled for ${date(i.scheduled_send_at,true)}`} · To ${E(i.mail_peer)}</p>
+      ${i.scheduled_issue?`<p class="evidence">${E(i.scheduled_issue)}</p>`:""}`:
+      `<p class="hint">${sendFollowUp?`Send to ${E(i.mail_peer)} in the original Gmail thread.`:"Send it in the original conversation, then record the send here."}</p>`}
+      <div class="actions">${sendFollowUp?B("Send Gmail follow-up","gmail-follow-up",i.id,"primary"):""}${B("Copy follow-up","copy-follow-up","",sendFollowUp?"":"primary")}
+      ${i.schedule_id?(!i.gmail_send_pending?B("Cancel scheduled send","gmail-cancel-schedule",i.id,"small"):""):'<button class="button">Save draft</button>'}
       ${event("Record follow-up sent","followed_up","")}</div>
+      ${sendFollowUp&&mail.scheduling?`<details class="section"><summary>Schedule a Gmail follow-up</summary>
+      <label>Send date and time<input type="datetime-local" id="follow-up-send-at"></label>
+      <p class="hint">Job Scout checks for a reply before sending. If the app is closed at that time, it checks and sends when reopened.</p>
+      ${B("Schedule this message","gmail-schedule",i.id,"small")}</details>`:""}
     </form></section>`:""}
     <section class="section"><p class="eyebrow">CONVERSATION ACTIONS</p><div class="actions">
     ${i.state==="draft"?event("Record as sent","sent","primary"):""}
@@ -455,6 +462,22 @@ async function sendGmail(id,followUp=false) {
   else await refreshNextActions();
   notice(updated.state==="replied"?"Gmail already has a reply from this contact.":"Sent via Gmail. Job Scout is tracking the thread.");
 }
+async function changeGmailSchedule(id,cancel=false) {
+  const title=$("#dialog-title"), item=S.item;
+  const path=`/outreach/${id}/gmail/follow-up-schedule`;
+  let updated;
+  if(cancel) {
+    updated=await api(`${path}/${encodeURIComponent(item.schedule_id)}`,"DELETE");
+  } else {
+    const sendAt=new Date($("#follow-up-send-at").value);
+    if(!Number.isFinite(sendAt.getTime())||sendAt<=new Date()) throw new Error("Choose a date and time in the future.");
+    updated=await api(path,"POST",{text:$("#follow-up-text").value,send_at:sendAt.toISOString(),
+      thread_id:item.thread_id,account:item.mail_account,recipient:item.mail_peer});
+  }
+  if(modal.open&&title.isConnected) {S.item=updated;showConversation();}
+  if(S.page==="outreach") await render();
+  notice(cancel?"Scheduled follow-up canceled.":"Gmail follow-up scheduled.");
+}
 async function copy(text) {
   await navigator.clipboard.writeText(text);
   notice("Copied to clipboard.");
@@ -479,6 +502,7 @@ async function act(action,id) {
     "mail-connect":async()=>{location.href=(await api("/gmail/authorize","POST")).url;},
     "mail-connect-send":async()=>{location.href=(await api("/gmail/authorize","POST",{send:true})).url;},
     "gmail-send":()=>sendGmail(id),"gmail-follow-up":()=>sendGmail(id,true),
+    "gmail-schedule":()=>changeGmailSchedule(id),"gmail-cancel-schedule":()=>changeGmailSchedule(id,true),
     "forget-brave":async()=>{await saveIntegration("brave","");},
     "forget-google":async()=>{await saveIntegration("google","");},
     "mail-disconnect":async()=>{await api("/gmail/disconnect","POST");await refreshState();await render();notice("Gmail disconnected.");},

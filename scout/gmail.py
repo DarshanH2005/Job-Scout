@@ -167,6 +167,7 @@ class Gmail:
                 WHERE id=? AND state='waiting' AND thread_id=? AND gmail_send_pending=''""",
                 (stamp, item["id"], item["thread_id"]))
             if update.rowcount:
+                conn.execute("DELETE FROM gmail_follow_up_schedule WHERE outreach_id=?", (item["id"],))
                 conn.execute("INSERT INTO events(outreach_id,kind,at,note) VALUES(?,?,?,?)",
                              (item["id"], "reply_detected", stamp, "Gmail reply from the linked recipient."))
             return update.rowcount
@@ -210,6 +211,8 @@ class Gmail:
                 (thread_id, account, int(last["internalDate"]), recipients[0], item_id))
             if not changed.rowcount:
                 raise ValueError("Record the Gmail send before linking a conversation.")
+            conn.execute("DELETE FROM gmail_follow_up_schedule WHERE outreach_id=? AND (thread_id<>? OR account<>? OR recipient<>?)",
+                         (item_id, thread_id, account, recipients[0]))
 
     async def check(self):
         async with self.lock:

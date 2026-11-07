@@ -58,6 +58,11 @@ CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY, outreach_id INTEGER NOT NULL REFERENCES outreach(id),
     kind TEXT NOT NULL, at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS gmail_follow_up_schedule (
+    id TEXT PRIMARY KEY, outreach_id INTEGER NOT NULL UNIQUE REFERENCES outreach(id),
+    send_at TEXT NOT NULL, message TEXT NOT NULL, account TEXT NOT NULL, recipient TEXT NOT NULL,
+    thread_id TEXT NOT NULL, issue TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS mail_seen (
     account TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL,
     at TEXT NOT NULL, subject TEXT NOT NULL DEFAULT '', dismissed INTEGER NOT NULL DEFAULT 0,
@@ -70,9 +75,11 @@ JOB_FIELDS = ("external_id", "title", "department", "location", "description", "
               "canonical_url", "posted_at", "deadline_at", "region", "evidence", "score", "reason")
 OUTREACH_SELECT = """
 SELECT o.*, c.name AS person, c.source, c.profile_url, c.email, j.title AS job_title, j.url AS job_url,
-       j.applied_at, co.name AS company
+       j.applied_at, co.name AS company, f.id AS schedule_id, f.send_at AS scheduled_send_at,
+       f.message AS scheduled_message, f.issue AS scheduled_issue
 FROM outreach o JOIN contacts c ON c.id=o.contact_id JOIN jobs j ON j.id=o.job_id
 JOIN companies co ON co.id=j.company_id
+LEFT JOIN gmail_follow_up_schedule f ON f.outreach_id=o.id
 """
 
 

@@ -135,6 +135,84 @@ def test_gmail_unknown_delivery_cannot_be_retried(desk, monkeypatch):
     assert len(attempts) == 1
 
 
+@pytest.mark.parametrize("outcome", ["sent", "replied", "unconfirmed"])
+def test_scheduled_gmail_follow_up_checks_thread_and_sends_at_most_once(tmp_path, monkeypatch, outcome):
+    from datetime import datetime, timedelta, timezone
+
+    db = tmp_path / "scheduled.sqlite3"
+    store = Store(db)
+    attempts = []
+    approved_message = "The follow-up I approved."
+    sender = "me@example.com"
+    recipient = "jane@example.com"
+    thread_id = "gmail-thread"
+    monkeypatch.setattr(app_module, "GMAIL_SCHEDULE_INTERVAL", 0.01)
+
+    async def token(self, send=False):
+        return sender, "fake-token"
+
+    async def thread(self, token, identifier):
+        assert identifier == thread_id
+        messages = [{"labelIds": ["SENT"], "internalDate": "1", "payload": {"headers": [
+            {"name": "Subject", "value": "Referral request"},
+            {"name": "Message-ID", "value": "<first@example.com>"},
+        ]}}]
+        if outcome == "replied":
+            messages.append({"internalDate": "2", "payload": {"headers": [{"name": "From", "value": recipient}]}})
+        return {"messages": messages}
+
+    async def send(token, message, identifier):
+        attempts.append((identifier, message.get_content().strip(), message["In-Reply-To"]))
+        if outcome == "unconfirmed":
+            raise httpx.ReadTimeout("Gmail did not respond")
+        return {"id": "follow-up", "threadId": identifier}
+
+    monkeypatch.setattr(Gmail, "token", token)
+    monkeypatch.setattr(Gmail, "thread", thread)
+    monkeypatch.setattr(Gmail, "send_message", staticmethod(send))
+    with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765") as client:
+        store.set_setting("gmail_account", sender)
+        store.set_setting("gmail_send_enabled", "1")
+        item = action(client, create_draft(client, saved_job(client), "gmail"), "sent")
+        path = f"/api/outreach/{item['id']}"
+        route = path + "/gmail/follow-up-schedule"
+        store.write("UPDATE outreach SET thread_id=?,mail_account=?,mail_peer=?,mail_anchor=1 WHERE id=?",
+                    (thread_id, sender, recipient, item["id"]))
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        payload = {"text": approved_message, "account": sender, "recipient": recipient,
+                   "thread_id": thread_id, "send_at": future}
+        result(client.post(route, json={**payload, "recipient": "other@example.com"}), 409)
+        first = result(client.post(route, json=payload))
+        result(client.delete(f"{route}/{first['schedule_id']}"))
+        scheduled = result(client.post(route, json=payload))
+        result(client.delete(f"{route}/{first['schedule_id']}"), 409)
+        result(client.post(path + "/gmail/send", json={"text": "A duplicate follow-up", "account": sender,
+                      "recipient": recipient, "expected_due_at": item["due_at"]}), 409)
+        result(client.patch(path + "/follow-up", json={"text": "A different unscheduled draft"}))
+        store.write("UPDATE gmail_follow_up_schedule SET send_at='2000-01-01T00:00:00Z' WHERE id=?",
+                    (scheduled["schedule_id"],))
+
+        for _ in range(100):
+            updated = result(client.get(path))
+            if not updated["schedule_id"] or updated["scheduled_issue"]:
+                break
+            time.sleep(.01)
+        else:
+            pytest.fail("The scheduled send did not finish.")
+
+        if outcome == "replied":
+            assert updated["state"] == "replied"
+            assert updated["schedule_id"] is None
+            assert attempts == []
+        else:
+            assert attempts == [(thread_id, approved_message, "<first@example.com>")]
+            if outcome == "sent":
+                assert updated["schedule_id"] is None
+                assert updated["events"][0]["message"] == approved_message
+            else:
+                assert updated["gmail_send_pending"] and updated["scheduled_issue"]
+
+
 def test_gmail_sending_scope_is_opt_in(desk, monkeypatch):
     from urllib.parse import parse_qs, urlsplit
 
