@@ -33,6 +33,10 @@ FULL_TIME_OFFICE = re.compile(
 GENERAL_REMOTE_POLICY = re.compile(r"\bfor\s+(?:(?:us|u\.s\.)[- ]based\s+)?roles\s+open\s+to\s+remote\s+work\b", re.I)
 ALL_ROLES_REMOTE = re.compile(r"^\W*all (?:of )?our (?:roles|positions) are remote\b", re.I)
 RESTRICTION = re.compile(r"\b(only|must|within|eligible|authorized|based|limited|available)\b", re.I)
+TIME_ZONE_REQUIREMENT = re.compile(
+    r"\b(?:must|require[ds]?|only)\b[^.!?\n]{0,100}\b(?:located|based|reside|live|within|in)\b"
+    r"[^.!?\n]{0,100}\b(?:time[ -]?zones?|(?:PST|PDT|MST|MDT|CST|CDT|EST|EDT|IST)\b)", re.I
+)
 US_REMOTE = re.compile(r"\b(?:remote\s*[-–—,:(/|]*\s*(?:us|usa|united states)\b|(?:us|usa|united states)\s*[-–—,:(/|]*\s*remote\b)", re.I)
 ROLE = re.compile(
     r"\b(?:software|full[ -]?stack|front[ -]?end|back[ -]?end|platform|data|analytics|"
@@ -142,13 +146,25 @@ def board_from_job_url(value):
     return None
 
 
+def required_timezone(description):
+    lines = re.split(r"\n|(?<=[.!?])\s+(?=[A-Z])", description[:18000])
+    return next((line.strip() for line in lines if len(line) < 300 and TIME_ZONE_REQUIREMENT.search(line)), "")
+
+
 def geography(location, workplace, description):
     source = f"{location} · {workplace}" if workplace else location
     remote = bool(REMOTE.search(source))
     lines = re.split(r"\n|(?<=[.!?])\s+(?=[A-Z])", description[:18000])
+    timezone = required_timezone(description)
+
+    def evidence_with_timezone(value):
+        if timezone and timezone.casefold() not in value.casefold():
+            return f"{value} · {timezone}" if value else timezone
+        return value
+
     office = next((line for line in lines if len(line) < 420 and FULL_TIME_OFFICE.search(line)), None)
     if office:
-        return ("india" if INDIA.search(location) or INDIA.search(office) else "other"), office
+        return ("india" if INDIA.search(location) or INDIA.search(office) else "other"), evidence_with_timezone(office)
     if INDIA.search(location):
         india_remote = bool(REMOTE.search(workplace)) or any(
             INDIA.search(part) and REMOTE.search(part) for part in re.split(r"[;|]", location)
@@ -156,28 +172,28 @@ def geography(location, workplace, description):
         if not india_remote and not re.search(r"\b(hybrid|on[- ]?site|in[- ]office)\b", source, re.I):
             policy = next((line for line in lines if len(line) < 420 and ALL_ROLES_REMOTE.search(line)), None)
             if policy:
-                return "india_remote", f"{location} · {policy}"
-        return ("india_remote" if india_remote else "india"), source
+                return "india_remote", evidence_with_timezone(f"{location} · {policy}")
+        return ("india_remote" if india_remote else "india"), evidence_with_timezone(source)
     if WORLDWIDE.search(location):
-        return "india_remote", source
+        return "india_remote", evidence_with_timezone(source)
     if US_REMOTE.search(source):
-        return "us_remote", source
+        return "us_remote", evidence_with_timezone(source)
 
     candidates = [line for line in lines if len(line) < 420 and REGIONAL_TEXT.search(line)
                   and not GENERAL_REMOTE_POLICY.search(line)]
     us_only = next((line for line in candidates if US.search(line) and
                     (US_REMOTE.search(line) or (RESTRICTION.search(line) and (remote or REMOTE.search(line))))), None)
     if us_only:
-        return "us_remote", us_only
+        return "us_remote", evidence_with_timezone(us_only)
     for line in candidates:
         if (WORLDWIDE.search(line) or INDIA.search(line)) and REMOTE.search(line):
             if remote or not location or re.fullmatch(r"remote|anywhere|global", location, re.I):
-                return "india_remote", line
+                return "india_remote", evidence_with_timezone(line)
     if remote and US.search(location):
-        return "us_remote", source
+        return "us_remote", evidence_with_timezone(source)
     if remote or not location:
-        return "unclear", source or "No location was supplied by the employer."
-    return "other", source
+        return "unclear", evidence_with_timezone(source or "No location was supplied by the employer.")
+    return "other", evidence_with_timezone(source)
 
 
 def assess(title, department, description, region):

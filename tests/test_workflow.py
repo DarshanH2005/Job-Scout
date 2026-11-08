@@ -493,6 +493,25 @@ def test_posting_requirements_take_precedence_over_general_remote_policy():
                      "5-7 years experience writing production-grade code.", "https://sample.example/3")["score"] == 0
 
 
+def test_location_evidence_includes_required_time_zone():
+    requirement = "Must be located in the PST/MST timezone"
+    assert geography("Massachusetts - Boston", "remote", requirement) == (
+        "unclear", "Massachusetts - Boston · remote · " + requirement)
+    assert geography("Remote - US", "", requirement) == ("us_remote", "Remote - US · " + requirement)
+    assert geography("Bangalore, India", "", "Meetings are held in the PST timezone.") == ("india", "Bangalore, India")
+
+
+def test_existing_jobs_gain_time_zone_evidence(desk):
+    client, store = desk
+    job = result(client.post("/api/jobs", json={"company": "Example", "title": "Software Engineer",
+        "url": "https://example.com/remote", "location": "Remote",
+        "description": "Must be located in the PST/MST timezone"}), 201)
+    store.write("UPDATE jobs SET evidence='Remote' WHERE id=?", (job["id"],))
+    store.write("DELETE FROM settings WHERE key='timezone_evidence_1'")
+    store.initialize(seed=False)
+    assert "Must be located in the PST/MST timezone" in result(client.get(f"/api/jobs/{job['id']}"))["evidence"]
+
+
 def test_explicit_all_remote_policy_uses_the_postings_india_location():
     policy = "All of our roles are remote, however some roles have location-based eligibility requirements."
     assert geography("Bangalore, India", "", policy) == ("india_remote", "Bangalore, India · " + policy)

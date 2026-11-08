@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .feeds import EARLY_SCORE, assess, eligibility_evidence
+from .feeds import EARLY_SCORE, assess, eligibility_evidence, required_timezone
 
 DATA = Path(__file__).with_name("companies.csv")
 EXPANDED_SOURCES = ("Databricks", "HP", "ServiceNow", "Snowflake", "Zscaler")
@@ -140,6 +140,15 @@ class Store:
                     if 0 < score < EARLY_SCORE:
                         conn.execute("UPDATE jobs SET score=?,reason=? WHERE id=?", (score, reason, row["id"]))
                 conn.execute("INSERT INTO settings VALUES('experience_ranking_1','1')")
+            if not conn.execute("SELECT 1 FROM settings WHERE key='timezone_evidence_1'").fetchone():
+                rows = conn.execute("SELECT id,evidence,description FROM jobs WHERE description<>''").fetchall()
+                for row in rows:
+                    timezone = required_timezone(row["description"])
+                    if timezone and timezone.casefold() not in row["evidence"].casefold():
+                        prefix = row["evidence"][:max(0, 497 - len(timezone))]
+                        evidence = f"{prefix} · {timezone}" if prefix else timezone
+                        conn.execute("UPDATE jobs SET evidence=? WHERE id=?", (evidence, row["id"]))
+                conn.execute("INSERT INTO settings VALUES('timezone_evidence_1','1')")
             conn.execute("UPDATE scans SET state='interrupted', finished_at=? WHERE state='running'", (now(),))
             if seed and not conn.execute("SELECT 1 FROM settings WHERE key='seeded'").fetchone():
                 with DATA.open(encoding="utf-8-sig", newline="") as handle:
