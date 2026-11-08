@@ -265,6 +265,7 @@ function updateJob(job) {
     job.eligibility=S.job.eligibility;
     job.details_status=S.job.details_status;
     job.detail_assessment=S.job.detail_assessment;
+    job.detail_location=S.job.detail_location;
   }
   S.job=job;
   showJob();
@@ -272,7 +273,7 @@ function updateJob(job) {
 function showJob() {
   const job=S.job;
   const referrals=job.referrals||[];
-  dialog(job.title,`${job.company} · ${regions[job.region]}`,`<div class="actions">
+  dialog(job.title,`${job.company} · ${regions[job.detail_location?.region||job.region]}`,`<div class="actions">
     ${L("Apply on company site",job.apply_url,"primary")}${B(job.saved?"Remove from saved":"Save job","save",job.id)}${B(job.applied_at?"Undo applied":"Mark applied","apply",job.id)}
     ${B(job.hidden?"Restore to job feed":"Hide from job feed","hide",job.id)}</div>
     <div class="actions">${B("Check this posting","verify-job",job.id,"small")}
@@ -286,6 +287,7 @@ function showJob() {
         <div><button class="button small">Save target date</button></div>
       </form></details>
     ${job.evidence?`<div class="evidence"><strong>Location evidence</strong><br>${E(job.evidence)}</div>`:""}
+    ${job.detail_location?`<div class="evidence"><strong>Location from the full posting · ${E(regions[job.detail_location.region])}</strong><br>${E(job.detail_location.evidence)}<br><span class="hint">The job feed and filters still use the scan summary.</span></div>`:""}
     ${job.details_status==="unavailable"?'<p class="hint">The employer description could not be loaded. Open the posting to review its requirements.</p>':""}
     ${job.detail_assessment?`<div class="evidence"><strong>Review experience</strong><br>${E(job.detail_assessment)}</div>`:""}
     ${job.eligibility?.length?`<section class="evidence" aria-label="Eligibility evidence"><strong>Eligibility evidence</strong>

@@ -653,10 +653,10 @@ def test_smartrecruiters_detail_is_loaded_on_demand_and_failure_is_visible(desk,
     client, store = desk
     job = saved_job(client)
     store.write("UPDATE companies SET provider='smartrecruiters',board='Sample' WHERE id=?", (job["company_id"],))
-    store.write("UPDATE jobs SET external_id='123',description='' WHERE id=?", (job["id"],))
+    store.write("UPDATE jobs SET external_id='123',description='',location='Remote',region='unclear',evidence='Remote · Remote' WHERE id=?", (job["id"],))
     calls = []
     response = {"id":"123", "active":True, "company":{"identifier":"Sample"}, "jobAd":{"sections":{
-        "jobDescription":{"title":"Job Description", "text":"<p>Build APIs.</p>"},
+        "jobDescription":{"title":"Job Description", "text":"<p>Build APIs.</p><p>Applicants must be based in the United States.</p>"},
         "qualifications":{"title":"Minimum requirements", "text":"<p>3+ years of software engineering experience.</p>"},
     }}}
 
@@ -671,8 +671,10 @@ def test_smartrecruiters_detail_is_loaded_on_demand_and_failure_is_visible(desk,
     assert detail["details_status"] == "loaded" and "Build APIs." in detail["description"]
     assert detail["eligibility"] == [{"label":"Required", "text":"3+ years of software engineering experience."}]
     assert "3+ years" in detail["detail_assessment"]
+    assert detail["detail_location"] == {"region":"us_remote", "evidence":"Applicants must be based in the United States."}
     assert calls == ["https://api.smartrecruiters.com/v1/companies/Sample/postings/123"]
     assert store.job(job["id"])["description"] == ""
+    assert store.job(job["id"])["region"] == "unclear"
     response["id"] = "other"
     assert result(client.get(f"/api/jobs/{job['id']}"))["details_status"] == "unavailable"
 
