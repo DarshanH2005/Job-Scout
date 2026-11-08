@@ -474,6 +474,15 @@ def test_shortlist_experience_and_posting_age(desk):
     assert ranged["score"] > 0
 
 
+def test_early_title_with_experience_requirement_is_not_ranked_as_new_grad():
+    job = build_job("1", "Software Engineer 1", "", "India", "", "Must Have Skills\n2+ years of experience as a software engineer.", "https://example.com/1")
+    assert job["score"] == 55 and "2+ years" in job["reason"]
+    preferred = build_job("2", "Software Engineer 1", "", "India", "", "Preferred qualifications\n2+ years of experience.", "https://example.com/2")
+    assert preferred["score"] == 90
+    capped = build_job("3", "Software Engineer 1", "", "India", "", "Up to 2 years of experience.", "https://example.com/3")
+    assert capped["score"] == 90
+
+
 def test_posting_requirements_take_precedence_over_general_remote_policy():
     boilerplate = "For US-based roles open to remote work, we hire only in certain states."
     office = "Are able to work in our San Francisco office 5 days/week."

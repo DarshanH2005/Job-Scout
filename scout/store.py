@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .feeds import EARLY_SCORE, eligibility_evidence
+from .feeds import EARLY_SCORE, assess, eligibility_evidence
 
 DATA = Path(__file__).with_name("companies.csv")
 EXPANDED_SOURCES = ("Databricks", "HP", "ServiceNow", "Snowflake", "Zscaler")
@@ -133,6 +133,13 @@ class Store:
                 conn.execute("ALTER TABLE contacts ADD COLUMN email TEXT NOT NULL DEFAULT ''")
             if not any(row["name"] == "message" for row in conn.execute("PRAGMA table_info(events)")):
                 conn.execute("ALTER TABLE events ADD COLUMN message TEXT NOT NULL DEFAULT ''")
+            if not conn.execute("SELECT 1 FROM settings WHERE key='experience_ranking_1'").fetchone():
+                rows = conn.execute("SELECT id,title,department,description,region FROM jobs WHERE score=?", (EARLY_SCORE,)).fetchall()
+                for row in rows:
+                    score, reason = assess(row["title"], row["department"], row["description"], row["region"])
+                    if 0 < score < EARLY_SCORE:
+                        conn.execute("UPDATE jobs SET score=?,reason=? WHERE id=?", (score, reason, row["id"]))
+                conn.execute("INSERT INTO settings VALUES('experience_ranking_1','1')")
             conn.execute("UPDATE scans SET state='interrupted', finished_at=? WHERE state='running'", (now(),))
             if seed and not conn.execute("SELECT 1 FROM settings WHERE key='seeded'").fetchone():
                 with DATA.open(encoding="utf-8-sig", newline="") as handle:

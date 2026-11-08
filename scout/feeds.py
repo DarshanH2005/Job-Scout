@@ -55,7 +55,7 @@ EDUCATION = re.compile(
 )
 DEGREE = re.compile(r"\b(?:degree|graduat\w*)\b", re.I)
 GRAD_DATE = re.compile(r"\b(?:by|between|before|after|in|through|from|expected|class of)\b[^.!?;\n]{0,36}\b20\d{2}\b", re.I)
-MINIMUM_HEADING = re.compile(r"(?:minimum|basic|required) (?:requirements|qualifications|experience|skills)|requirements|required|must have", re.I)
+MINIMUM_HEADING = re.compile(r"(?:minimum|basic|required) (?:requirements|qualifications|experience|skills)|requirements|required|must have(?: (?:skills|qualifications|requirements))?", re.I)
 PREFERRED_HEADING = re.compile(r"preferred(?: (?:requirements|qualifications|experience|skills))?|nice to have|bonus points", re.I)
 OTHER_HEADING = re.compile(r"(?:about (?:us|the role|the team)|responsibilities|benefits|compensation|in-office expectations|what (?:you.ll do|we offer|we.re looking for)|equal opportunity)", re.I)
 COMPANY_BACKGROUND = re.compile(r"^(?:we|our (?:company|team)|the company) (?:have|has|bring|brings|offer|offers)\b", re.I)
@@ -187,6 +187,14 @@ def assess(title, department, description, region):
     if SENIOR.search(title):
         return 0, ""
     if EARLY.search(title):
+        for evidence in eligibility_evidence(description):
+            if evidence["label"] == "Preferred":
+                continue
+            excerpt = evidence["text"]
+            for match in YEARS.finditer(excerpt):
+                prefix = excerpt[max(0, match.start() - 30):match.start()]
+                if int(match["minimum"]) >= 2 and not re.search(r"\b(?:up to|at most|no more than|less than|maximum of)\s*$", prefix, re.I):
+                    return 55, f"Early-career title; posting mentions {match['minimum']}+ years of experience. Check requirements."
         return EARLY_SCORE, "Relevant role with an early-career title"
     if any(int(match["minimum"]) >= 3 and not re.search(r"\bup to\s*$", description[max(0, match.start()-12):match.start()], re.I)
            for match in YEARS.finditer(description[:16000])):
