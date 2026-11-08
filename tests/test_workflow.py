@@ -649,6 +649,33 @@ def test_posting_requirements_take_precedence_over_general_remote_policy():
                      "5-7 years experience writing production-grade code.", "https://sample.example/3")["score"] == 0
 
 
+def test_smartrecruiters_detail_is_loaded_on_demand_and_failure_is_visible(desk, monkeypatch):
+    client, store = desk
+    job = saved_job(client)
+    store.write("UPDATE companies SET provider='smartrecruiters',board='Sample' WHERE id=?", (job["company_id"],))
+    store.write("UPDATE jobs SET external_id='123',description='' WHERE id=?", (job["id"],))
+    calls = []
+    response = {"id":"123", "active":True, "company":{"identifier":"Sample"}, "jobAd":{"sections":{
+        "jobDescription":{"title":"Job Description", "text":"<p>Build APIs.</p>"},
+        "qualifications":{"title":"Minimum requirements", "text":"<p>2+ years of software engineering experience.</p>"},
+    }}}
+
+    def respond(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, json=response)
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr("scout.app.httpx.AsyncClient",
+                        lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    detail = result(client.get(f"/api/jobs/{job['id']}"))
+    assert detail["details_status"] == "loaded" and "Build APIs." in detail["description"]
+    assert detail["eligibility"] == [{"label":"Required", "text":"2+ years of software engineering experience."}]
+    assert calls == ["https://api.smartrecruiters.com/v1/companies/Sample/postings/123"]
+    assert store.job(job["id"])["description"] == ""
+    response["id"] = "other"
+    assert result(client.get(f"/api/jobs/{job['id']}"))["details_status"] == "unavailable"
+
+
 def test_location_evidence_includes_required_time_zone():
     requirement = "Must be located in the PST/MST timezone"
     assert geography("Massachusetts - Boston", "remote", requirement) == (

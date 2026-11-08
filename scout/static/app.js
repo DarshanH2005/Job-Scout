@@ -259,6 +259,15 @@ function employer(id) {
   <div><button class="button primary">Save employer</button></div></form>`);
 }
 async function openJob(id) { S.job=await api(`/jobs/${id}`); S.people=[]; showJob(); }
+function updateJob(job) {
+  if(S.job?.id===job.id && S.job.details_status && !job.description) {
+    job.description=S.job.description;
+    job.eligibility=S.job.eligibility;
+    job.details_status=S.job.details_status;
+  }
+  S.job=job;
+  showJob();
+}
 function showJob() {
   const job=S.job;
   const referrals=job.referrals||[];
@@ -276,6 +285,7 @@ function showJob() {
         <div><button class="button small">Save target date</button></div>
       </form></details>
     ${job.evidence?`<div class="evidence"><strong>Location evidence</strong><br>${E(job.evidence)}</div>`:""}
+    ${job.details_status==="unavailable"?'<p class="hint">The employer description could not be loaded. Open the posting to review its requirements.</p>':""}
     ${job.eligibility?.length?`<section class="evidence" aria-label="Eligibility evidence"><strong>Eligibility evidence</strong>
       <ul class="eligibility-list">${job.eligibility.map(item=>`<li>${tag(item.label)} <span>${E(item.text)}</span></li>`).join("")}</ul></section>`:""}
     ${referrals.length?`<section class="section"><h3>Referral conversations</h3><div class="panel">
@@ -432,7 +442,7 @@ async function jobFlag(id,kind) {
   const title=$("#dialog-title");
   const changes={save:{saved:!S.job.saved},apply:{applied:!S.job.applied_at},hide:{hidden:!S.job.hidden}};
   const job=await api(`/jobs/${id}`,"PATCH",changes[kind]);
-  if(modal.open&&title.isConnected) {S.job=job;showJob();}
+  if(modal.open&&title.isConnected) updateJob(job);
   if(kind==="hide") {
     await refreshState(); await render();
     notice(job.hidden?"Job hidden from the feed.":"Job restored to the feed.");
@@ -601,7 +611,7 @@ document.addEventListener("submit",event=>{
       }
       case "application-target": {
         const job=await api(`/jobs/${id}`,"PATCH",{application_target:data.target||null});
-        if(form.isConnected&&modal.open) {S.job=job;showJob();}
+        if(form.isConnected&&modal.open) updateJob(job);
         await Promise.all([refreshJobs(),refreshNextActions()]);
         notice(job.application_target?"Target date saved.":"Target date cleared.");
         break;

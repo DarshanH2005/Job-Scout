@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 import httpx
@@ -21,7 +21,7 @@ from pydantic import AwareDatetime, BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import credentials
-from .feeds import PROVIDERS, REGIONS, board_from_job_url, build_job, canonical_url, fetch_board, public_url
+from .feeds import PROVIDERS, REGIONS, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, public_url
 from .gmail import Gmail, headers, incoming_reply
 from .research import ResearchCache, find_people, rewrite
 from .store import OUTREACH_SELECT, Store, now
@@ -370,7 +370,37 @@ def create_app(db_path=None, seed=True):
 
     @app.get("/api/jobs/{job_id}")
     async def job(job_id: int):
-        return job_or_404(store, job_id)
+        item = job_or_404(store, job_id)
+        if item["provider"] != "smartrecruiters" or item["description"]:
+            return item
+        company = store.one("SELECT board FROM companies WHERE id=?", (item["company_id"],))
+        if not company or not re.fullmatch(r"[A-Za-z0-9._-]+", company["board"]):
+            item["details_status"] = "unavailable"
+            return item
+        url = PROVIDERS["smartrecruiters"].format(board=quote(company["board"], safe=""))
+        url += "/" + quote(item["external_id"], safe="")
+        try:
+            async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
+                detail = await fetch_json(client, url)
+            if (str(detail["id"]) != item["external_id"] or detail.get("active") is False
+                    or detail["company"]["identifier"].casefold() != company["board"].casefold()):
+                raise ValueError("The employer posting did not match.")
+            sections = detail["jobAd"]["sections"]
+            parts = []
+            for key in ("companyDescription", "jobDescription", "qualifications", "additionalInformation"):
+                section = sections.get(key) or {}
+                title, text = clean(section.get("title")), clean(section.get("text"))
+                if text:
+                    parts.append("\n".join(filter(None, (title, text))))
+            description = "\n".join(parts)[:30000]
+            if not description:
+                raise ValueError("The employer posting contained no description.")
+            item["description"] = description
+            item["eligibility"] = eligibility_evidence(description)
+            item["details_status"] = "loaded"
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+            item["details_status"] = "unavailable"
+        return item
 
     @app.post("/api/jobs/{job_id}/verify")
     async def verify_job(job_id: int):
