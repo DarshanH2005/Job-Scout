@@ -239,6 +239,8 @@ def test_stripe_author_research_requires_recent_engineering_bio(monkeypatch):
     def respond(request):
         if request.url.path == "/sitemap.xml":
             return httpx.Response(200, text=sitemap)
+        if request.url.path == "/blog/topic/engineering":
+            return httpx.Response(200, text="<p>Author:</p><p>Casey Three</p><p>Authors:</p><p>Alex One, Blair Two</p>")
         name, bio, published = bios[request.url.path]
         return httpx.Response(200, text=f"<h2>Blog: {name}(1)</h2><p>{bio}</p><p>{published}</p>")
 
@@ -249,6 +251,32 @@ def test_stripe_author_research_requires_recent_engineering_bio(monkeypatch):
     assert [person["name"] for person in candidates] == ["Alex One"]
     assert candidates[0]["source"] == urls[0]
     assert "Verify location" in candidates[0]["reason"]
+
+
+def test_stripe_recent_authors_are_checked_before_sitemap_limit(monkeypatch):
+    from datetime import date
+
+    urls = [f"https://stripe.dev/authors/author-{i:02d}" for i in range(20)] + ["https://stripe.dev/authors/zara-example"]
+    sitemap = '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + "".join(
+        f"<url><loc>{url}</loc></url>" for url in urls) + "</urlset>"
+    fetched = []
+
+    def respond(request):
+        if request.url.path == "/sitemap.xml":
+            return httpx.Response(200, text=sitemap)
+        if request.url.path == "/blog/topic/engineering":
+            return httpx.Response(200, text="<p>Author:</p><p>Zara Example</p>")
+        fetched.append(request.url.path)
+        if request.url.path == "/authors/zara-example":
+            return httpx.Response(200, text=f"<h2>Blog: Zara Example(1)</h2><p>Zara is an engineer at Stripe.</p><p>{date.today():%Y.%m.%d}</p>")
+        return httpx.Response(404)
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr("scout.research.httpx.AsyncClient",
+                        lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    candidates = asyncio.run(stripe_authors())
+    assert [person["name"] for person in candidates] == ["Zara Example"]
+    assert len(fetched) == 16 and "/authors/zara-example" in fetched
 
 
 def test_cloudflare_authors_need_public_engineering_role(monkeypatch):

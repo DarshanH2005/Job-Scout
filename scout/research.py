@@ -3,6 +3,7 @@
 import os
 import re
 import asyncio
+import unicodedata
 from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
@@ -18,6 +19,7 @@ TECH = re.compile(r"\b(engineer|engineering|developer|researcher|scientist|engin
 AUTHOR_ROLE = re.compile(r"\b(?:engineer|engineering manager|engineering lead|research scientist)\b", re.I)
 CONTENT_TITLE = re.compile(r"\b(team|blog|engineering|software|platform|data|career|jobs|home|conference|speaker|meet|build|how|why|introducing|about)\b", re.I)
 STRIPE_SITEMAP = "https://stripe.dev/sitemap.xml"
+STRIPE_ENGINEERING = "https://stripe.dev/blog/topic/engineering"
 CLOUDFLARE_BLOG = "https://blog.cloudflare.com/"
 ROLE_AREAS = {
     "infrastructure": re.compile(r"\b(?:infrastructure|platform|systems?|kubernetes|cloud|devops|sre)\b", re.I),
@@ -84,7 +86,24 @@ async def stripe_authors():
         response.raise_for_status()
         root = ElementTree.fromstring(response.content)
         urls = [node.text for node in root.iter() if node.tag.endswith("}loc") and node.text
-                and re.fullmatch(r"https://stripe\.dev/authors/[a-z0-9-]+", node.text)][:16]
+                and re.fullmatch(r"https://stripe\.dev/authors/[a-z0-9-]+", node.text)]
+        try:
+            response = await client.get(STRIPE_ENGINEERING)
+            response.raise_for_status()
+            lines = clean(response.text).splitlines()
+            names = [name.strip() for i, line in enumerate(lines[:-1]) if line in {"Author:", "Authors:"}
+                     for name in lines[i + 1].split(",") if NAME.fullmatch(name.strip())]
+            paths = {url.rsplit("/", 1)[-1]: url for url in urls}
+            recent = []
+            for name in names:
+                ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+                slug = re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-")
+                if slug in paths and paths[slug] not in recent:
+                    recent.append(paths[slug])
+            urls = recent + [url for url in urls if url not in recent]
+        except httpx.HTTPError:
+            pass
+        urls = urls[:16]
         limit = asyncio.Semaphore(4)
 
         async def author(url):
