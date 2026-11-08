@@ -135,7 +135,7 @@ def test_gmail_unknown_delivery_cannot_be_retried(desk, monkeypatch):
     assert len(attempts) == 1
 
 
-@pytest.mark.parametrize("outcome", ["sent", "replied", "unconfirmed"])
+@pytest.mark.parametrize("outcome", ["sent", "replied", "unconfirmed", "unexpected"])
 def test_scheduled_gmail_follow_up_checks_thread_and_sends_at_most_once(tmp_path, monkeypatch, outcome):
     from datetime import datetime, timedelta, timezone
 
@@ -153,6 +153,8 @@ def test_scheduled_gmail_follow_up_checks_thread_and_sends_at_most_once(tmp_path
 
     async def thread(self, token, identifier):
         assert identifier == thread_id
+        if outcome == "unexpected":
+            raise KeyError("unexpected response")
         messages = [{"labelIds": ["SENT"], "internalDate": "1", "payload": {"headers": [
             {"name": "Subject", "value": "Referral request"},
             {"name": "Message-ID", "value": "<first@example.com>"},
@@ -200,7 +202,13 @@ def test_scheduled_gmail_follow_up_checks_thread_and_sends_at_most_once(tmp_path
         else:
             pytest.fail("The scheduled send did not finish.")
 
-        if outcome == "replied":
+        if outcome == "unexpected":
+            assert updated["state"] == "waiting" and updated["scheduled_issue"]
+            assert attempts == []
+            assert result(client.get("/api/state"))["mail"]["scheduling"]
+            time.sleep(.05)
+            assert attempts == []
+        elif outcome == "replied":
             assert updated["state"] == "replied"
             assert updated["schedule_id"] is None
             assert attempts == []

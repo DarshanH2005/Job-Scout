@@ -214,23 +214,36 @@ def create_app(db_path=None, seed=True):
     async def follow_up_loop():
         while True:
             await asyncio.sleep(GMAIL_SCHEDULE_INTERVAL)
-            due = store.all("""SELECT f.*, o.due_at FROM gmail_follow_up_schedule f
-                JOIN outreach o ON o.id=f.outreach_id
-                WHERE f.send_at<=? AND f.issue='' AND o.state='waiting' AND o.gmail_send_pending=''
-                ORDER BY f.send_at LIMIT 10""", (now(),))
+            try:
+                due = store.all("""SELECT f.*, o.due_at FROM gmail_follow_up_schedule f
+                    JOIN outreach o ON o.id=f.outreach_id
+                    WHERE f.send_at<=? AND f.issue='' AND o.state='waiting' AND o.gmail_send_pending=''
+                    ORDER BY f.send_at LIMIT 10""", (now(),))
+            except Exception:
+                import logging
+                logging.exception("Could not read scheduled Gmail follow-ups")
+                continue
             for schedule in due:
-                data = GmailSend(text=schedule["message"], account=schedule["account"],
-                                 recipient=schedule["recipient"], expected_due_at=schedule["due_at"])
                 try:
+                    data = GmailSend(text=schedule["message"], account=schedule["account"],
+                                     recipient=schedule["recipient"], expected_due_at=schedule["due_at"])
                     await deliver_gmail(schedule["outreach_id"], data, schedule)
-                except HTTPException as exc:
-                    store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE id=?", (exc.detail, schedule["id"]))
+                except Exception as exc:
+                    import logging
+                    if not isinstance(exc, HTTPException):
+                        logging.exception("Scheduled Gmail follow-up failed")
+                    issue = exc.detail if isinstance(exc, HTTPException) else "An unexpected error occurred. Check Gmail Sent before rescheduling."
+                    try:
+                        store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE id=?", (issue, schedule["id"]))
+                    except Exception:
+                        logging.exception("Could not mark scheduled Gmail follow-up for review")
 
     @asynccontextmanager
     async def lifespan(_app):
         store.initialize(seed=seed)
         worker = asyncio.create_task(mail_loop())
         follow_ups = asyncio.create_task(follow_up_loop())
+        _app.state.follow_ups = follow_ups
         try:
             yield
         finally:
@@ -275,7 +288,7 @@ def create_app(db_path=None, seed=True):
                 "rewrite_configured": bool(os.getenv("SCOUT_OPENAI_KEY") and os.getenv("SCOUT_OPENAI_MODEL")),
                 "mail": {"account": account, "configured": credentials.google_configured(),
                          "send_enabled": bool(account and store.setting("gmail_send_enabled") == "1"),
-                         "scheduling": True,
+                         "scheduling": bool(getattr(app.state, "follow_ups", None) and not app.state.follow_ups.done()),
                          "from_env": bool(os.getenv("SCOUT_GOOGLE_CLIENT_FILE")),
                          "checked_at": store.setting("gmail_checked_at"),
                          "issue": store.setting("gmail_issue"),
