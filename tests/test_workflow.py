@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import scout.app as app_module
 from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, normalize
 from scout.gmail import Gmail, SEND_SCOPE, SCOPE, incoming_reply
-from scout.research import cloudflare_authors, public_candidates, rank_candidates, stripe_authors
+from scout.research import ResearchCache, cloudflare_authors, public_candidates, rank_candidates, stripe_authors
 from scout.store import Store
 
 
@@ -307,6 +307,55 @@ def test_contact_ranking_explains_related_area_without_claiming_same_team():
     assert [person["name"] for person in ranked] == ["Rupert Carr", "Dan Jones"]
     assert "infrastructure" in ranked[0]["reason"] and "team is unconfirmed" in ranked[0]["reason"]
     assert "does not establish a matching specialty" in ranked[1]["reason"]
+
+
+def test_public_author_cache_deduplicates_and_retries_empty_results():
+    async def exercise():
+        cache = ResearchCache()
+        calls = []
+
+        async def search():
+            calls.append("search")
+            await asyncio.sleep(.01)
+            return [{"name": "Alex Example"}]
+
+        first, second = await asyncio.gather(cache.authors("stripe", search), cache.authors("stripe", search))
+        assert len(calls) == 1
+        assert first == ([{"name": "Alex Example"}], False)
+        assert second == ([{"name": "Alex Example"}], True)
+        cache.entries["stripe"] = (0, first[0])
+        assert (await cache.authors("stripe", search))[1] is False
+        assert len(calls) == 2
+
+        async def empty():
+            calls.append("empty")
+            return []
+
+        await cache.authors("cloudflare", empty)
+        await cache.authors("cloudflare", empty)
+        assert calls.count("empty") == 2
+
+    asyncio.run(exercise())
+
+
+def test_people_endpoint_reuses_official_authors_per_company(desk, monkeypatch):
+    client, _ = desk
+    calls = []
+
+    async def authors():
+        calls.append(True)
+        return [{"name": "Alex Example", "title": "Software engineer at Stripe", "source": "https://stripe.dev/authors/alex-example",
+                 "notes": "", "reason": "Public author page."}]
+
+    monkeypatch.setattr("scout.research.stripe_authors", authors)
+    monkeypatch.setattr("scout.research.brave_key", lambda: "")
+    job = result(client.post("/api/jobs", json={"company": "Stripe", "title": "Software Engineer",
+                         "url": "https://example.com/stripe-role"}), 201)
+    path = f"/api/jobs/{job['id']}/people"
+    assert result(client.get(path))["official_cached"] is False
+    second = result(client.get(path))
+    assert second["official_cached"] is True and second["people"][0]["name"] == "Alex Example"
+    assert len(calls) == 1
 
 
 def test_expired_gmail_authorization_surfaces_reconnect_in_settings(desk, monkeypatch):

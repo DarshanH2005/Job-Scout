@@ -318,7 +318,7 @@ async function findPeople(id) {
       return `<div class="person"><strong>${E(p.name)}</strong><p>${E(p.title)}</p><p>${E(p.reason)}</p><p>${E(p.notes)}</p>
       <div class="actions">${L(profile?"Open LinkedIn profile":"Find person on LinkedIn",profile||personSearch)}${p.source?L("View source",p.source):""}${action}</div></div>`;
     }).join("")}
-    ${hint?`<p class="hint">${E(hint)}</p>`:""}<div class="actions">
+    ${hint?`<p class="hint">${E(hint)}</p>`:""}${result.official_cached?'<p class="hint">Public author results were checked within the last 15 minutes.</p>':""}<div class="actions">
     ${L("Search LinkedIn",`https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(S.query)}`)}${B("Copy search query","copy-query","","small")}</div>`;
   } catch(error) { if(target.isConnected) target.textContent=error.message; throw error; }
 }

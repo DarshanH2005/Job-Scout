@@ -23,7 +23,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import credentials
 from .feeds import PROVIDERS, REGIONS, board_from_job_url, build_job, canonical_url, fetch_board, public_url
 from .gmail import Gmail, headers, incoming_reply
-from .research import find_people, rewrite
+from .research import ResearchCache, find_people, rewrite
 from .store import OUTREACH_SELECT, Store, now
 
 ROOT = Path(__file__).resolve().parent
@@ -194,6 +194,7 @@ class Scanner:
 def create_app(db_path=None, seed=True):
     store = Store(db_path or os.getenv("SCOUT_DB") or APP_DATA / "scout.sqlite3")
     scanner, gmail = Scanner(store), Gmail(store)
+    research_cache = ResearchCache()
 
     async def check_mail():
         try:
@@ -433,7 +434,7 @@ def create_app(db_path=None, seed=True):
 
     @app.get("/api/jobs/{job_id}/people")
     async def people(job_id: int):
-        return await find_people(store, job_or_404(store, job_id))
+        return await find_people(store, job_or_404(store, job_id), research_cache)
 
     @app.post("/api/jobs/{job_id}/draft", status_code=201)
     async def draft(job_id: int, data: DraftInput):

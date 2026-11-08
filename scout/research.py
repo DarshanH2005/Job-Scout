@@ -3,6 +3,7 @@
 import os
 import re
 import asyncio
+import time
 import unicodedata
 from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
@@ -21,6 +22,7 @@ CONTENT_TITLE = re.compile(r"\b(team|blog|engineering|software|platform|data|car
 STRIPE_SITEMAP = "https://stripe.dev/sitemap.xml"
 STRIPE_ENGINEERING = "https://stripe.dev/blog/topic/engineering"
 CLOUDFLARE_BLOG = "https://blog.cloudflare.com/"
+OFFICIAL_CACHE_SECONDS = 15 * 60
 ROLE_AREAS = {
     "infrastructure": re.compile(r"\b(?:infrastructure|platform|systems?|kubernetes|cloud|devops|sre)\b", re.I),
     "security": re.compile(r"\b(?:security|cybersecurity|red team|detection|iam)\b", re.I),
@@ -175,7 +177,23 @@ async def cloudflare_authors():
         return [person for person in await asyncio.gather(*(author(path) for path in parser.paths[:16])) if person]
 
 
-async def find_people(store, job):
+class ResearchCache:
+    def __init__(self):
+        self.entries = {}
+        self.locks = {company: asyncio.Lock() for company in ("stripe", "cloudflare")}
+
+    async def authors(self, company, search):
+        async with self.locks[company]:
+            cached = self.entries.get(company)
+            if cached and cached[0] > time.monotonic():
+                return cached[1], True
+            people = await search()
+            if people:
+                self.entries[company] = (time.monotonic() + OFFICIAL_CACHE_SECONDS, people)
+            return people, False
+
+
+async def find_people(store, job, cache=None):
     query, specialty = search_terms(job)
     saved = store.all("SELECT * FROM contacts WHERE company_id=? ORDER BY id DESC", (job["company_id"],))
     saved.sort(key=lambda person: specialty.split()[0] not in person["title"].lower())
@@ -206,11 +224,17 @@ async def find_people(store, job):
         else:
             status = "needs_key"
     official_sources = {"stripe": stripe_authors, "cloudflare": cloudflare_authors}
-    official_search = official_sources.get(job["company"].casefold())
+    company = job["company"].casefold()
+    official_search = official_sources.get(company)
+    official_cached = False
     if len(people) < 3 and official_search:
         try:
             seen = {person["name"].casefold() for person in people}
-            for person in rank_candidates(job, await official_search()):
+            if cache:
+                authors, official_cached = await cache.authors(company, official_search)
+            else:
+                authors = await official_search()
+            for person in rank_candidates(job, authors):
                 if person["name"].casefold() not in seen and len(people) < 3:
                     people.append(person)
                     seen.add(person["name"].casefold())
@@ -218,7 +242,7 @@ async def find_people(store, job):
                         status = "official"
         except (httpx.HTTPError, ElementTree.ParseError, ValueError):
             pass
-    return {"people": people, "query": query, "status": status}
+    return {"people": people, "query": query, "status": status, "official_cached": official_cached}
 
 
 async def rewrite(text):
