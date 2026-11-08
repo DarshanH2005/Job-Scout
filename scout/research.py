@@ -19,6 +19,14 @@ AUTHOR_ROLE = re.compile(r"\b(?:engineer|engineering manager|engineering lead|re
 CONTENT_TITLE = re.compile(r"\b(team|blog|engineering|software|platform|data|career|jobs|home|conference|speaker|meet|build|how|why|introducing|about)\b", re.I)
 STRIPE_SITEMAP = "https://stripe.dev/sitemap.xml"
 CLOUDFLARE_BLOG = "https://blog.cloudflare.com/"
+ROLE_AREAS = {
+    "infrastructure": re.compile(r"\b(?:infrastructure|platform|systems?|kubernetes|cloud|devops|sre)\b", re.I),
+    "security": re.compile(r"\b(?:security|cybersecurity|red team|detection|iam)\b", re.I),
+    "data": re.compile(r"\b(?:data|analytics|database)\b", re.I),
+    "machine learning": re.compile(r"\b(?:ai|ml|machine learning|artificial intelligence)\b", re.I),
+    "frontend": re.compile(r"\b(?:front[ -]?end|web|ui)\b", re.I),
+    "backend": re.compile(r"\b(?:back[ -]?end|server[ -]?side)\b", re.I),
+}
 
 
 def search_terms(job):
@@ -30,6 +38,23 @@ def search_terms(job):
     else:
         specialty = "software engineering"
     return f'"{job["company"]}" "{specialty}"', specialty
+
+
+def relevant_areas(job, person):
+    job_text = f"{job['title']} {job.get('department', '')}"
+    person_text = f"{person.get('title', '')} {person.get('notes', '')}"
+    return [area for area, pattern in ROLE_AREAS.items() if pattern.search(job_text) and pattern.search(person_text)]
+
+
+def rank_candidates(job, candidates):
+    ranked = []
+    for person in candidates:
+        areas = relevant_areas(job, person)
+        explanation = (f"Job and profile suggest a shared area in {', '.join(areas)}. " if areas else
+                       "The source does not establish a matching specialty. ")
+        ranked.append((len(areas), {**person, "reason": person["reason"] + " " + explanation +
+                                     "The job's team is unconfirmed."}))
+    return [person for _, person in sorted(ranked, key=lambda row: -row[0])]
 
 
 def public_candidates(results, company, specialty):
@@ -151,7 +176,8 @@ async def find_people(store, job):
                     )
                     response.raise_for_status()
                 seen = {person["name"].casefold() for person in people}
-                for person in public_candidates(response.json().get("web", {}).get("results", []), job["company"], specialty):
+                candidates = public_candidates(response.json().get("web", {}).get("results", []), job["company"], specialty)
+                for person in rank_candidates(job, candidates):
                     if person["name"].casefold() not in seen and len(people) < 3:
                         people.append(person)
                         seen.add(person["name"].casefold())
@@ -165,7 +191,7 @@ async def find_people(store, job):
     if len(people) < 3 and official_search:
         try:
             seen = {person["name"].casefold() for person in people}
-            for person in await official_search():
+            for person in rank_candidates(job, await official_search()):
                 if person["name"].casefold() not in seen and len(people) < 3:
                     people.append(person)
                     seen.add(person["name"].casefold())

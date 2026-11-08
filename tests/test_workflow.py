@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import scout.app as app_module
 from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, normalize
 from scout.gmail import Gmail, SEND_SCOPE, SCOPE, incoming_reply
-from scout.research import cloudflare_authors, public_candidates, stripe_authors
+from scout.research import cloudflare_authors, public_candidates, rank_candidates, stripe_authors
 from scout.store import Store
 
 
@@ -267,6 +267,18 @@ def test_cloudflare_authors_need_public_engineering_role(monkeypatch):
     assert [person["name"] for person in candidates] == ["Alex One"]
     assert candidates[0]["source"] == "https://blog.cloudflare.com/author/engineer-one/"
     assert "Verify current employment" in candidates[0]["reason"]
+
+
+def test_contact_ranking_explains_related_area_without_claiming_same_team():
+    job = {"title": "Software Engineer - Kubernetes platform", "department": ""}
+    candidates = [
+        {"name": "Dan Jones", "title": "Principal Red Team Engineer", "notes": "", "reason": "Public profile."},
+        {"name": "Rupert Carr", "title": "Systems Engineer", "notes": "", "reason": "Public profile."},
+    ]
+    ranked = rank_candidates(job, candidates)
+    assert [person["name"] for person in ranked] == ["Rupert Carr", "Dan Jones"]
+    assert "infrastructure" in ranked[0]["reason"] and "team is unconfirmed" in ranked[0]["reason"]
+    assert "does not establish a matching specialty" in ranked[1]["reason"]
 
 
 def test_expired_gmail_authorization_surfaces_reconnect_in_settings(desk, monkeypatch):
