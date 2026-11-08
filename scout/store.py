@@ -281,8 +281,10 @@ class Store:
             clauses.append("instr(lower(j.title || ' ' || c.name || ' ' || j.department), lower(?))>0")
             args.append(search)
         where = " AND ".join(clauses)
+        fresh_first = ("CASE WHEN j.new_scan=(SELECT MAX(id) FROM scans WHERE scope='full' AND state='completed') "
+                       "THEN 0 ELSE 1 END, " if view not in {"saved", "hidden"} else "")
         order = """CASE j.region WHEN 'india_remote' THEN 0 WHEN 'india' THEN 0 WHEN 'us_remote' THEN 2
-                   WHEN 'unclear' THEN 3 ELSE 4 END, c.status='failed', j.score DESC,
+                   WHEN 'unclear' THEN 3 ELSE 4 END, c.status='failed', """ + fresh_first + """j.score DESC,
                    coalesce(julianday(j.posted_at),julianday(j.first_seen)) DESC, j.id DESC"""
         if view == "saved":
             order = "CASE WHEN j.applied_at IS NULL THEN j.application_target END ASC NULLS LAST, " + order

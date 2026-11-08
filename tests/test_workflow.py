@@ -482,6 +482,32 @@ def test_retry_checks_only_failed_feeds_and_keeps_full_baseline(desk, monkeypatc
     assert all(row["new_scan"] == full["id"] for row in recent)
 
 
+def test_newly_discovered_jobs_rank_ahead_within_location_group(desk, monkeypatch):
+    client, _ = desk
+    register(client)
+    old = sample("23", "Junior Software Engineer")
+    new = sample("24", "Software Engineer")
+    new["posted_at"] = "2020-01-01"
+    us_job = build_job("25", "Junior Software Engineer", "Engineering", "Remote - US", "", "Build APIs.",
+                       "https://job-boards.greenhouse.io/sample/jobs/25")
+    rows = [old]
+
+    async def fetch(_client, _company, _limit):
+        return rows, None
+
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    scan(client)
+    rows = [old, new, us_job]
+    assert scan(client)["fresh"] == 2
+    jobs = result(client.get("/api/jobs"))["items"]
+    assert [job["region"] for job in jobs] == ["india_remote", "india_remote", "us_remote"]
+    assert [job["title"] for job in jobs] == ["Software Engineer", "Junior Software Engineer", "Junior Software Engineer"]
+    assert jobs[0]["score"] < jobs[1]["score"]
+    assert [job["id"] for job in result(client.get("/api/jobs?latest=true"))["items"]] == [jobs[0]["id"], jobs[2]["id"]]
+    scan(client)
+    assert result(client.get("/api/jobs"))["items"][0]["title"] == "Junior Software Engineer"
+
+
 def test_saved_link_draft_and_independent_application(desk):
     client, _store = desk
     job = saved_job(client)
