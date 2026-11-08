@@ -4,6 +4,7 @@ import os
 import re
 import asyncio
 from datetime import date, datetime, timedelta
+from html.parser import HTMLParser
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
@@ -17,6 +18,7 @@ TECH = re.compile(r"\b(engineer|engineering|developer|researcher|scientist|engin
 AUTHOR_ROLE = re.compile(r"\b(?:engineer|engineering manager|engineering lead|research scientist)\b", re.I)
 CONTENT_TITLE = re.compile(r"\b(team|blog|engineering|software|platform|data|career|jobs|home|conference|speaker|meet|build|how|why|introducing|about)\b", re.I)
 STRIPE_SITEMAP = "https://stripe.dev/sitemap.xml"
+CLOUDFLARE_BLOG = "https://blog.cloudflare.com/"
 
 
 def search_terms(job):
@@ -88,6 +90,47 @@ async def stripe_authors():
         return [person for person in await asyncio.gather(*(author(url) for url in urls)) if person]
 
 
+async def cloudflare_authors():
+    """Read role-bearing author profiles linked from recent Cloudflare posts."""
+    class AuthorLinks(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.paths = []
+
+        def handle_starttag(self, tag, attrs):
+            path = dict(attrs).get("href", "")
+            if tag == "a" and re.fullmatch(r"/author/[a-z0-9-]+/", path) and path not in self.paths:
+                self.paths.append(path)
+
+    async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+        response = await client.get(CLOUDFLARE_BLOG)
+        response.raise_for_status()
+        parser = AuthorLinks()
+        parser.feed(response.text)
+        limit = asyncio.Semaphore(4)
+
+        async def author(path):
+            async with limit:
+                try:
+                    response = await client.get(CLOUDFLARE_BLOG.rstrip("/") + path)
+                    response.raise_for_status()
+                    lines = clean(response.text).splitlines()
+                    if not lines or not lines[0].endswith(" - Cloudflare Blog"):
+                        return None
+                    name = lines[0].removesuffix(" - Cloudflare Blog").strip()
+                    heading = next((i for i, line in enumerate(lines[1:], 1) if line == name), None)
+                    if not NAME.fullmatch(name) or heading is None or heading + 1 >= len(lines):
+                        return None
+                    role = lines[heading + 1]
+                    if len(role) > 200 or not AUTHOR_ROLE.search(role):
+                        return None
+                    return dict(name=name, title=role, source=CLOUDFLARE_BLOG.rstrip("/") + path, notes="",
+                                reason="Cloudflare's blog lists this engineering role. Verify current employment and location.")
+                except (httpx.HTTPError, ValueError, TypeError):
+                    return None
+        return [person for person in await asyncio.gather(*(author(path) for path in parser.paths[:16])) if person]
+
+
 async def find_people(store, job):
     query, specialty = search_terms(job)
     saved = store.all("SELECT * FROM contacts WHERE company_id=? ORDER BY id DESC", (job["company_id"],))
@@ -117,10 +160,12 @@ async def find_people(store, job):
                 status = "unavailable"
         else:
             status = "needs_key"
-    if len(people) < 3 and job["company"].casefold() == "stripe":
+    official_sources = {"stripe": stripe_authors, "cloudflare": cloudflare_authors}
+    official_search = official_sources.get(job["company"].casefold())
+    if len(people) < 3 and official_search:
         try:
             seen = {person["name"].casefold() for person in people}
-            for person in await stripe_authors():
+            for person in await official_search():
                 if person["name"].casefold() not in seen and len(people) < 3:
                     people.append(person)
                     seen.add(person["name"].casefold())

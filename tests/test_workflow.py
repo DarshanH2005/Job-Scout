@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import scout.app as app_module
 from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, normalize
 from scout.gmail import Gmail, SEND_SCOPE, SCOPE, incoming_reply
-from scout.research import public_candidates, stripe_authors
+from scout.research import cloudflare_authors, public_candidates, stripe_authors
 from scout.store import Store
 
 
@@ -249,6 +249,24 @@ def test_stripe_author_research_requires_recent_engineering_bio(monkeypatch):
     assert [person["name"] for person in candidates] == ["Alex One"]
     assert candidates[0]["source"] == urls[0]
     assert "Verify location" in candidates[0]["reason"]
+
+
+def test_cloudflare_authors_need_public_engineering_role(monkeypatch):
+    pages = {
+        "/": '<a href="/author/engineer-one/">Engineer</a><a href="/author/writer-two/">Writer</a>',
+        "/author/engineer-one/": '<title>Alex One - Cloudflare Blog</title><div><h1>Alex One</h1><p>Systems Engineer • London</p></div>',
+        "/author/writer-two/": '<title>Blair Two - Cloudflare Blog</title><div><h1>Blair Two</h1><p>Technical writer covering engineering</p></div>',
+    }
+    def respond(request):
+        return httpx.Response(200, text=pages[request.url.path])
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr("scout.research.httpx.AsyncClient",
+                        lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    candidates = asyncio.run(cloudflare_authors())
+    assert [person["name"] for person in candidates] == ["Alex One"]
+    assert candidates[0]["source"] == "https://blog.cloudflare.com/author/engineer-one/"
+    assert "Verify current employment" in candidates[0]["reason"]
 
 
 def test_expired_gmail_authorization_surfaces_reconnect_in_settings(desk, monkeypatch):

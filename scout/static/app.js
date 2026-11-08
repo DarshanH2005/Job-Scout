@@ -308,7 +308,7 @@ async function findPeople(id) {
     if(!target.isConnected) return;
     S.people=result.people; S.query=result.query;
     const hint={needs_key:"Set a Brave Search key to enable public research. You can use this LinkedIn query now.",
-      official:"Results include Stripe's public engineering author pages. Verify their current role and location. Add a Brave Search key for broader research.",
+      official:"Results include public engineering author pages. Verify their current role and location. Add a Brave Search key for broader research.",
       unavailable:"Public search is temporarily unavailable. Try the LinkedIn query.",searched:"Verify current employment before sending."}[result.status];
     target.innerHTML=`${S.people.map((p,index)=>{
       const existing=(S.job.referrals||[]).find(i=>i.contact_id===p.id&&!["closed","submitted"].includes(i.state));
