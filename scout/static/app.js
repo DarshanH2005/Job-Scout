@@ -264,6 +264,7 @@ function updateJob(job) {
     job.description=S.job.description;
     job.eligibility=S.job.eligibility;
     job.details_status=S.job.details_status;
+    job.detail_assessment=S.job.detail_assessment;
   }
   S.job=job;
   showJob();
@@ -286,6 +287,7 @@ function showJob() {
       </form></details>
     ${job.evidence?`<div class="evidence"><strong>Location evidence</strong><br>${E(job.evidence)}</div>`:""}
     ${job.details_status==="unavailable"?'<p class="hint">The employer description could not be loaded. Open the posting to review its requirements.</p>':""}
+    ${job.detail_assessment?`<div class="evidence"><strong>Review experience</strong><br>${E(job.detail_assessment)}</div>`:""}
     ${job.eligibility?.length?`<section class="evidence" aria-label="Eligibility evidence"><strong>Eligibility evidence</strong>
       <ul class="eligibility-list">${job.eligibility.map(item=>`<li>${tag(item.label)} <span>${E(item.text)}</span></li>`).join("")}</ul></section>`:""}
     ${referrals.length?`<section class="section"><h3>Referral conversations</h3><div class="panel">

@@ -21,7 +21,7 @@ from pydantic import AwareDatetime, BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import credentials
-from .feeds import PROVIDERS, REGIONS, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, public_url
+from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, public_url
 from .gmail import Gmail, headers, incoming_reply
 from .research import ResearchCache, find_people, rewrite
 from .store import OUTREACH_SELECT, Store, now
@@ -397,6 +397,9 @@ def create_app(db_path=None, seed=True):
                 raise ValueError("The employer posting contained no description.")
             item["description"] = description
             item["eligibility"] = eligibility_evidence(description)
+            detailed_score, detailed_reason = assess(item["title"], item["department"], description, item["region"])
+            if detailed_score < item["score"]:
+                item["detail_assessment"] = detailed_reason or "The full posting indicates greater experience requirements. Review the qualifications."
             item["details_status"] = "loaded"
         except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
             item["details_status"] = "unavailable"

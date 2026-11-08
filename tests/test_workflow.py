@@ -657,7 +657,7 @@ def test_smartrecruiters_detail_is_loaded_on_demand_and_failure_is_visible(desk,
     calls = []
     response = {"id":"123", "active":True, "company":{"identifier":"Sample"}, "jobAd":{"sections":{
         "jobDescription":{"title":"Job Description", "text":"<p>Build APIs.</p>"},
-        "qualifications":{"title":"Minimum requirements", "text":"<p>2+ years of software engineering experience.</p>"},
+        "qualifications":{"title":"Minimum requirements", "text":"<p>3+ years of software engineering experience.</p>"},
     }}}
 
     def respond(request):
@@ -669,7 +669,8 @@ def test_smartrecruiters_detail_is_loaded_on_demand_and_failure_is_visible(desk,
                         lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
     detail = result(client.get(f"/api/jobs/{job['id']}"))
     assert detail["details_status"] == "loaded" and "Build APIs." in detail["description"]
-    assert detail["eligibility"] == [{"label":"Required", "text":"2+ years of software engineering experience."}]
+    assert detail["eligibility"] == [{"label":"Required", "text":"3+ years of software engineering experience."}]
+    assert "3+ years" in detail["detail_assessment"]
     assert calls == ["https://api.smartrecruiters.com/v1/companies/Sample/postings/123"]
     assert store.job(job["id"])["description"] == ""
     response["id"] = "other"
