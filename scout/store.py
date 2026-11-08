@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .feeds import EARLY_SCORE, assess, eligibility_evidence, required_timezone
+from .feeds import EARLY_SCORE, assess, eligibility_evidence, required_timezone, work_authorization_evidence
 
 DATA = Path(__file__).with_name("companies.csv")
 EXPANDED_SOURCES = ("Databricks", "HP", "ServiceNow", "Snowflake", "Zscaler")
@@ -298,6 +298,7 @@ class Store:
                           FROM jobs j JOIN companies c ON c.id=j.company_id WHERE j.id=?""", (job_id,))
         if row:
             row["eligibility"] = eligibility_evidence(row["description"])
+            row["work_authorization"] = work_authorization_evidence(row["description"])
             row["referrals"] = self.all("""SELECT o.id, o.contact_id, o.channel, o.state, o.due_at, c.name AS person
                 FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.job_id=?
                 ORDER BY o.state IN ('closed','submitted'), o.id DESC""", (job_id,))

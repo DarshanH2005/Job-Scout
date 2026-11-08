@@ -21,7 +21,7 @@ from pydantic import AwareDatetime, BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import credentials
-from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, public_url
+from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, public_url, work_authorization_evidence
 from .gmail import Gmail, headers, incoming_reply
 from .research import ResearchCache, find_people, rewrite
 from .store import OUTREACH_SELECT, Store, now
@@ -410,6 +410,7 @@ def create_app(db_path=None, seed=True):
                 raise ValueError("The employer posting contained no description.")
             item["description"] = description
             item["eligibility"] = eligibility_evidence(description)
+            item["work_authorization"] = work_authorization_evidence(description)
             location = detail.get("location") or {}
             workplace = "Hybrid" if location.get("hybrid") else "Remote" if location.get("remote") else ""
             if not workplace:

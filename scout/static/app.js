@@ -264,6 +264,7 @@ function updateJob(job) {
   if(S.job?.id===job.id && S.job.details_status && !job.description) {
     job.description=S.job.description;
     job.eligibility=S.job.eligibility;
+    job.work_authorization=S.job.work_authorization;
     job.details_status=S.job.details_status;
     job.detail_assessment=S.job.detail_assessment;
     job.detail_location=S.job.detail_location;
@@ -293,6 +294,8 @@ function showJob() {
     ${job.detail_assessment?`<div class="evidence"><strong>Review experience</strong><br>${E(job.detail_assessment)}</div>`:""}
     ${job.eligibility?.length?`<section class="evidence" aria-label="Eligibility evidence"><strong>Eligibility evidence</strong>
       <ul class="eligibility-list">${job.eligibility.map(item=>`<li>${tag(item.label)} <span>${E(item.text)}</span></li>`).join("")}</ul></section>`:""}
+    ${job.work_authorization?.length?`<section class="evidence" aria-label="Work authorization and visa"><strong>Work authorization and visa</strong>
+      <ul class="eligibility-list">${job.work_authorization.map(text=>`<li>${E(text)}</li>`).join("")}</ul><span class="hint">Employer wording; check the posting for full details.</span></section>`:""}
     ${referrals.length?`<section class="section"><h3>Referral conversations</h3><div class="panel">
       ${referrals.map(i=>`<div class="inbox-row"><div><strong>${E(i.person)}</strong><span class="micro">${channels[i.channel]}${i.due_at?` · Check ${date(i.due_at)}`:""}</span></div>
       <div class="actions">${tag(stages[i.state],i.state==="submitted"?"good":"")}${B("Open referral","job-conversation",i.id,"small")}</div></div>`).join("")}

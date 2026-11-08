@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import scout.app as app_module
-from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, normalize
+from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, normalize, work_authorization_evidence
 from scout.gmail import Gmail, SEND_SCOPE, SCOPE, incoming_reply
 from scout.research import ResearchCache, cloudflare_authors, datadog_speakers, public_candidates, rank_candidates, stripe_authors
 from scout.store import Store
@@ -690,7 +690,7 @@ def test_smartrecruiters_detail_is_loaded_on_demand_and_failure_is_visible(desk,
     store.write("UPDATE jobs SET external_id='123',description='',location='Remote',region='unclear',evidence='Remote · Remote' WHERE id=?", (job["id"],))
     calls = []
     response = {"id":"123", "active":True, "company":{"identifier":"Sample"}, "jobAd":{"sections":{
-        "jobDescription":{"title":"Job Description", "text":"<p>Build APIs.</p><p>Applicants must be based in the United States.</p>"},
+        "jobDescription":{"title":"Job Description", "text":"<p>Build APIs.</p><p>Applicants must be based in the United States.</p><p>Must be authorized to work in the United States.</p>"},
         "qualifications":{"title":"Minimum requirements", "text":"<p>3+ years of software engineering experience.</p>"},
     }}}
 
@@ -706,6 +706,7 @@ def test_smartrecruiters_detail_is_loaded_on_demand_and_failure_is_visible(desk,
     assert detail["eligibility"] == [{"label":"Required", "text":"3+ years of software engineering experience."}]
     assert "3+ years" in detail["detail_assessment"]
     assert detail["detail_location"] == {"region":"us_remote", "evidence":"Applicants must be based in the United States."}
+    assert detail["work_authorization"] == ["Must be authorized to work in the United States."]
     assert calls == ["https://api.smartrecruiters.com/v1/companies/Sample/postings/123"]
     assert store.job(job["id"])["description"] == ""
     assert store.job(job["id"])["region"] == "unclear"
@@ -899,6 +900,19 @@ def test_job_detail_quotes_required_and_preferred_eligibility(desk):
     assert eligibility_evidence("Applications close on November 30, 2026.") == [
         {"label": "Application deadline", "text": "Applications close on November 30, 2026."},
     ]
+
+
+def test_work_authorization_shows_employer_wording_with_caveats(desk):
+    paragraph = "Visa sponsorship: We do sponsor visas! However, we cannot sponsor every role or candidate."
+    restriction = "Applicants must be authorized to work in the U.S. F-1 students are eligible with CPT."
+    irrelevant = "Benefits include an employer-sponsored retirement plan and state-sponsored research."
+    export = "Authorization to receive controlled technology without sponsorship for an export license."
+    description = "\n".join((irrelevant, paragraph, restriction, export, paragraph))
+    assert work_authorization_evidence(description) == [paragraph, restriction]
+    client, _ = desk
+    job = result(client.post("/api/jobs", json={"company":"Example", "title":"Software Engineer Intern",
+                 "url":"https://example.com/intern", "description":description}), 201)
+    assert result(client.get(f"/api/jobs/{job['id']}"))["work_authorization"] == [paragraph, restriction]
 
 
 def test_application_targets_prioritize_outstanding_saved_jobs(desk):

@@ -68,6 +68,14 @@ APPLICATION_DEADLINE = re.compile(
     r"(?:\b20\d{2}-\d{2}-\d{2}\b|\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
     r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}\b)", re.I
 )
+WORK_AUTHORIZATION = re.compile(
+    r"\b(?:work authori[sz]ation|authori[sz]ation to work|authori[sz]ed to work|eligible to work|"
+    r"right to work|work permits?|visa sponsorship|immigration sponsorship)\b"
+    r"|\bsponsor(?:s|ing|ship)?\b[^\n]{0,90}\b(?:visas?|immigration|international candidates|work authori[sz]ation)\b"
+    r"|\b(?:visas?|immigration)\b[^\n]{0,90}\bsponsor(?:s|ed|ing|ship)?\b"
+    r"|\b(?:we|employer|company)\s+(?:do(?:es)? not|cannot|will not|do(?:es)?|will|may)\s+sponsor\s+(?:any\s+)?(?:applicants|candidates|employees)\b",
+    re.I,
+)
 
 
 class PlainText(HTMLParser):
@@ -248,6 +256,20 @@ def eligibility_evidence(description, limit=4):
                 seen.add(excerpt)
     priority = {"Application deadline": 0, "Required": 1, "From the posting": 2, "Preferred": 3}
     return sorted(evidence, key=lambda item: priority[item["label"]])[:limit]
+
+
+def work_authorization_evidence(description, limit=3):
+    """Keep the employer's paragraph intact, including any sponsorship caveats."""
+    excerpts, seen = [], set()
+    for line in description.splitlines():
+        excerpt = line.strip(" \t*•●")
+        if not excerpt or len(excerpt) > 1800 or excerpt in seen or not WORK_AUTHORIZATION.search(excerpt):
+            continue
+        excerpts.append(excerpt)
+        seen.add(excerpt)
+        if len(excerpts) >= limit:
+            break
+    return excerpts
 
 
 def normalize(provider, raw):
