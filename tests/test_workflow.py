@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import scout.app as app_module
 from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, normalize
 from scout.gmail import Gmail, SEND_SCOPE, SCOPE, incoming_reply
-from scout.research import ResearchCache, cloudflare_authors, public_candidates, rank_candidates, stripe_authors
+from scout.research import ResearchCache, cloudflare_authors, datadog_speakers, public_candidates, rank_candidates, stripe_authors
 from scout.store import Store
 
 
@@ -303,6 +303,32 @@ def test_cloudflare_authors_need_public_engineering_role(monkeypatch):
     assert [person["name"] for person in candidates] == ["Alex One"]
     assert candidates[0]["source"] == "https://blog.cloudflare.com/author/engineer-one/"
     assert "Verify current employment" in candidates[0]["reason"]
+
+
+def test_datadog_speakers_require_recent_employer_and_engineering_role(monkeypatch):
+    from datetime import date
+
+    year = date.today().year
+    html = f'''<title>{year} Speakers | DASH by Datadog</title>
+        <p>Alex One</p><p>Software Engineer | Datadog</p><p>Alex works on backend systems at Datadog.</p>
+        <p>Blair Two</p><p>Software Engineer | Other Company</p>
+        <p>Casey Three</p><p>Product Manager | Datadog</p>
+        <p>Alex One</p><p>Software Engineer | Datadog</p>'''
+
+    def respond(request):
+        assert str(request.url) == "https://dash.datadoghq.com/sessions/speakers/"
+        return httpx.Response(200, text=html)
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr("scout.research.httpx.AsyncClient",
+                        lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    candidates = asyncio.run(datadog_speakers())
+    assert [person["name"] for person in candidates] == ["Alex One"]
+    assert candidates[0]["title"] == "Software Engineer"
+    assert candidates[0]["notes"] == "Alex works on backend systems at Datadog."
+    assert str(year) in candidates[0]["reason"] and "Verify" in candidates[0]["reason"]
+    html = html.replace(str(year), str(year - 3))
+    assert asyncio.run(datadog_speakers()) == []
 
 
 def test_contact_ranking_explains_related_area_without_claiming_same_team():

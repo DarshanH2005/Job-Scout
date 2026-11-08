@@ -22,6 +22,7 @@ CONTENT_TITLE = re.compile(r"\b(team|blog|engineering|software|platform|data|car
 STRIPE_SITEMAP = "https://stripe.dev/sitemap.xml"
 STRIPE_ENGINEERING = "https://stripe.dev/blog/topic/engineering"
 CLOUDFLARE_BLOG = "https://blog.cloudflare.com/"
+DATADOG_SPEAKERS = "https://dash.datadoghq.com/sessions/speakers/"
 OFFICIAL_CACHE_SECONDS = 15 * 60
 ROLE_AREAS = {
     "infrastructure": re.compile(r"\b(?:infrastructure|platform|systems?|kubernetes|cloud|devops|sre)\b", re.I),
@@ -177,10 +178,37 @@ async def cloudflare_authors():
         return [person for person in await asyncio.gather(*(author(path) for path in parser.paths[:16])) if person]
 
 
+async def datadog_speakers():
+    """Use recent conference speaker cards with a stated Datadog engineering role."""
+    async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+        response = await client.get(DATADOG_SPEAKERS)
+        response.raise_for_status()
+    lines = clean(response.content.decode("utf-8", errors="replace")).splitlines()
+    heading = next((re.fullmatch(r"(20\d{2}) Speakers(?: \| DASH by Datadog)?", line) for line in lines
+                    if re.fullmatch(r"(20\d{2}) Speakers(?: \| DASH by Datadog)?", line)), None)
+    if not heading or not date.today().year - 2 <= int(heading[1]) <= date.today().year:
+        return []
+    year = heading[1]
+    people, seen = [], set()
+    for i, line in enumerate(lines[1:], 1):
+        role = re.fullmatch(r"(.{1,180}?)\s*\|\s*Datadog", line, re.I)
+        name = lines[i - 1]
+        if not role or not NAME.fullmatch(name) or not AUTHOR_ROLE.search(role[1]) or name.casefold() in seen:
+            continue
+        bio = lines[i + 1] if i + 1 < len(lines) else ""
+        if not re.search(r"\bDatadog\b", bio, re.I):
+            bio = ""
+        bio = re.split(r"(?<=[.!?])\s+", bio, maxsplit=1)[0][:350]
+        people.append(dict(name=name, title=role[1], source=DATADOG_SPEAKERS, notes=bio,
+                           reason=f"Datadog's {year} conference listed this engineering role. Verify current employment and location."))
+        seen.add(name.casefold())
+    return people
+
+
 class ResearchCache:
     def __init__(self):
         self.entries = {}
-        self.locks = {company: asyncio.Lock() for company in ("stripe", "cloudflare")}
+        self.locks = {company: asyncio.Lock() for company in ("stripe", "cloudflare", "datadog")}
 
     async def authors(self, company, search):
         async with self.locks[company]:
@@ -223,7 +251,7 @@ async def find_people(store, job, cache=None):
                 status = "unavailable"
         else:
             status = "needs_key"
-    official_sources = {"stripe": stripe_authors, "cloudflare": cloudflare_authors}
+    official_sources = {"stripe": stripe_authors, "cloudflare": cloudflare_authors, "datadog": datadog_speakers}
     company = job["company"].casefold()
     official_search = official_sources.get(company)
     official_cached = False
