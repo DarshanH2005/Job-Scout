@@ -140,6 +140,16 @@ class Store:
                     if 0 < score < EARLY_SCORE:
                         conn.execute("UPDATE jobs SET score=?,reason=? WHERE id=?", (score, reason, row["id"]))
                 conn.execute("INSERT INTO settings VALUES('experience_ranking_1','1')")
+            if not conn.execute("SELECT 1 FROM settings WHERE key='experience_ranking_2'").fetchone():
+                rows = conn.execute("""SELECT j.id,j.title,j.department,j.description,j.region,j.score
+                    FROM jobs j JOIN companies c ON c.id=j.company_id
+                    WHERE j.score=? OR (j.score=0 AND (c.provider IN ('greenhouse','lever','ashby') OR (c.provider='' AND j.manual=1)))""",
+                    (EARLY_SCORE,)).fetchall()
+                for row in rows:
+                    score, reason = assess(row["title"], row["department"], row["description"], row["region"])
+                    if (row["score"] == 0 and score > 0) or (row["score"] == EARLY_SCORE and 0 < score < EARLY_SCORE):
+                        conn.execute("UPDATE jobs SET score=?,reason=? WHERE id=?", (score, reason, row["id"]))
+                conn.execute("INSERT INTO settings VALUES('experience_ranking_2','1')")
             if not conn.execute("SELECT 1 FROM settings WHERE key='timezone_evidence_1'").fetchone():
                 rows = conn.execute("SELECT id,evidence,description FROM jobs WHERE description<>''").fetchall()
                 for row in rows:

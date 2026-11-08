@@ -623,6 +623,22 @@ def test_early_title_with_experience_requirement_is_not_ranked_as_new_grad():
     assert capped["score"] == 90
 
 
+def test_experience_ranking_respects_preferred_and_all_required_evidence(desk):
+    preferred = "Minimum requirements\nA computer science degree.\nPreferred qualifications\n3+ years of experience."
+    assert build_job("1", "Software Engineer", "", "India", "", preferred, "https://example.com/1")["score"] == 55
+    assert build_job("2", "Software Engineer", "", "India", "", "Our company has 20 years of experience.", "https://example.com/2")["score"] == 55
+    many = "Minimum requirements\n" + "\n".join(f"{i} year of experience in project {i}." for i in range(1, 5)) + "\n2+ years of software engineering experience."
+    assert build_job("3", "Software Engineer 1", "", "India", "", many, "https://example.com/3")["score"] == 55
+
+    client, store = desk
+    job = result(client.post("/api/jobs", json={"company":"Example", "title":"Software Engineer",
+                 "url":"https://example.com/preferred", "description":preferred}), 201)
+    store.write("UPDATE jobs SET score=0,reason='' WHERE id=?", (job["id"],))
+    store.write("DELETE FROM settings WHERE key='experience_ranking_2'")
+    store.initialize(seed=False)
+    assert result(client.get(f"/api/jobs/{job['id']}"))["score"] == 55
+
+
 def test_posting_requirements_take_precedence_over_general_remote_policy():
     boilerplate = "For US-based roles open to remote work, we hire only in certain states."
     office = "Are able to work in our San Francisco office 5 days/week."

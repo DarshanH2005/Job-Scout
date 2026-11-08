@@ -202,23 +202,26 @@ def assess(title, department, description, region):
             return 0, ""
     if SENIOR.search(title):
         return 0, ""
+    experience = []
+    for evidence in eligibility_evidence(description, limit=None):
+        excerpt = evidence["text"]
+        if evidence["label"] in {"Preferred", "Application deadline"} or re.match(r"^(?:preferred|nice to have|bonus|ideally)\b", excerpt, re.I):
+            continue
+        for match in YEARS.finditer(excerpt):
+            prefix = excerpt[max(0, match.start() - 30):match.start()]
+            if not re.search(r"\b(?:up to|at most|no more than|less than|maximum of)\s*$", prefix, re.I):
+                experience.append(int(match["minimum"]))
     if EARLY.search(title):
-        for evidence in eligibility_evidence(description):
-            if evidence["label"] == "Preferred":
-                continue
-            excerpt = evidence["text"]
-            for match in YEARS.finditer(excerpt):
-                prefix = excerpt[max(0, match.start() - 30):match.start()]
-                if int(match["minimum"]) >= 2 and not re.search(r"\b(?:up to|at most|no more than|less than|maximum of)\s*$", prefix, re.I):
-                    return 55, f"Early-career title; posting mentions {match['minimum']}+ years of experience. Check requirements."
+        if any(years >= 2 for years in experience):
+            minimum = max(experience)
+            return 55, f"Early-career title; posting mentions {minimum}+ years of experience. Check requirements."
         return EARLY_SCORE, "Relevant role with an early-career title"
-    if any(int(match["minimum"]) >= 3 and not re.search(r"\bup to\s*$", description[max(0, match.start()-12):match.start()], re.I)
-           for match in YEARS.finditer(description[:16000])):
+    if any(years >= 3 for years in experience):
         return 0, ""
     return 55, "Relevant role. Check the experience requirements."
 
 
-def eligibility_evidence(description):
+def eligibility_evidence(description, limit=4):
     """Keep explicit excerpts and the employer's qualification labels when present."""
     section, evidence, seen = "From the posting", [], set()
     for line in description.splitlines():
@@ -244,7 +247,7 @@ def eligibility_evidence(description):
                 evidence.append({"label": section, "text": excerpt})
                 seen.add(excerpt)
     priority = {"Application deadline": 0, "Required": 1, "From the posting": 2, "Preferred": 3}
-    return sorted(evidence, key=lambda item: priority[item["label"]])[:4]
+    return sorted(evidence, key=lambda item: priority[item["label"]])[:limit]
 
 
 def normalize(provider, raw):
