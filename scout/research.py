@@ -2,7 +2,10 @@
 
 import os
 import re
+import asyncio
+from datetime import date, datetime, timedelta
 from urllib.parse import urlsplit
+from xml.etree import ElementTree
 
 import httpx
 
@@ -11,7 +14,9 @@ from .credentials import brave_key
 
 NAME = re.compile(r"[A-Z][\w.'’\-]+(?:\s+[A-Z][\w.'’\-]+){1,3}", re.UNICODE)
 TECH = re.compile(r"\b(engineer|engineering|developer|researcher|scientist|engineering manager)\b", re.I)
+AUTHOR_ROLE = re.compile(r"\b(?:engineer|engineering manager|engineering lead|research scientist)\b", re.I)
 CONTENT_TITLE = re.compile(r"\b(team|blog|engineering|software|platform|data|career|jobs|home|conference|speaker|meet|build|how|why|introducing|about)\b", re.I)
+STRIPE_SITEMAP = "https://stripe.dev/sitemap.xml"
 
 
 def search_terms(job):
@@ -45,6 +50,44 @@ def public_candidates(results, company, specialty):
     return [person for _, person in sorted(matches, key=lambda row: -row[0])]
 
 
+async def stripe_authors():
+    """Read Stripe's public author bios, keeping recently published engineers."""
+    async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+        response = await client.get(STRIPE_SITEMAP)
+        response.raise_for_status()
+        root = ElementTree.fromstring(response.content)
+        urls = [node.text for node in root.iter() if node.tag.endswith("}loc") and node.text
+                and re.fullmatch(r"https://stripe\.dev/authors/[a-z0-9-]+", node.text)][:16]
+        limit = asyncio.Semaphore(4)
+
+        async def author(url):
+            async with limit:
+                try:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    lines = clean(response.text).splitlines()
+                    heading = next((i for i, line in enumerate(lines) if re.fullmatch(r"Blog: .+\(\d+\)", line)), None)
+                    if heading is None or heading + 1 >= len(lines):
+                        return None
+                    name = re.sub(r"\(\d+\)$", "", lines[heading].removeprefix("Blog: ")).strip()
+                    bio = re.split(r"(?<=[.!?])\s+", lines[heading + 1], maxsplit=1)[0]
+                    dates = []
+                    for line in lines[heading + 2:]:
+                        if re.fullmatch(r"20\d{2}\.\d{1,2}\.\d{1,2}", line):
+                            try:
+                                dates.append(datetime.strptime(line, "%Y.%m.%d").date())
+                            except ValueError:
+                                continue
+                    if (not NAME.fullmatch(name) or not AUTHOR_ROLE.search(bio) or not re.search(r"\bStripe\b", bio, re.I)
+                            or not dates or max(dates) < date.today() - timedelta(days=730)):
+                        return None
+                    return dict(name=name, title=bio[:200], source=url, notes="",
+                                reason="Stripe's author page identifies this person as an engineer. Verify location and current role.")
+                except (httpx.HTTPError, ValueError, TypeError):
+                    return None
+        return [person for person in await asyncio.gather(*(author(url) for url in urls)) if person]
+
+
 async def find_people(store, job):
     query, specialty = search_terms(job)
     saved = store.all("SELECT * FROM contacts WHERE company_id=? ORDER BY id DESC", (job["company_id"],))
@@ -74,6 +117,17 @@ async def find_people(store, job):
                 status = "unavailable"
         else:
             status = "needs_key"
+    if len(people) < 3 and job["company"].casefold() == "stripe":
+        try:
+            seen = {person["name"].casefold() for person in people}
+            for person in await stripe_authors():
+                if person["name"].casefold() not in seen and len(people) < 3:
+                    people.append(person)
+                    seen.add(person["name"].casefold())
+                    if status == "needs_key":
+                        status = "official"
+        except (httpx.HTTPError, ElementTree.ParseError, ValueError):
+            pass
     return {"people": people, "query": query, "status": status}
 
 

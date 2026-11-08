@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import scout.app as app_module
 from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, normalize
 from scout.gmail import Gmail, SEND_SCOPE, SCOPE, incoming_reply
-from scout.research import public_candidates
+from scout.research import public_candidates, stripe_authors
 from scout.store import Store
 
 
@@ -221,6 +221,34 @@ def test_gmail_sending_scope_is_opt_in(desk, monkeypatch):
     for send, scopes in [(False, [SCOPE]), (True, [SCOPE, SEND_SCOPE])]:
         url = result(client.post("/api/gmail/authorize", json={"send": send}))["url"]
         assert parse_qs(urlsplit(url).query)["scope"][0].split() == scopes
+
+
+def test_stripe_author_research_requires_recent_engineering_bio(monkeypatch):
+    from datetime import date
+
+    urls = ["https://stripe.dev/authors/alex-one", "https://stripe.dev/authors/blair-two",
+            "https://stripe.dev/authors/casey-three"]
+    sitemap = '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + "".join(
+        f"<url><loc>{url}</loc></url>" for url in urls) + "</urlset>"
+    bios = {
+        "/authors/alex-one": ("Alex One", "Alex is a software engineer at Stripe.", date.today().strftime("%Y.%m.%d")),
+        "/authors/blair-two": ("Blair Two", "Blair is a writer at Stripe covering engineering.", date.today().strftime("%Y.%m.%d")),
+        "/authors/casey-three": ("Casey Three", "Casey is an engineer at Stripe.", "2020.01.01"),
+    }
+
+    def respond(request):
+        if request.url.path == "/sitemap.xml":
+            return httpx.Response(200, text=sitemap)
+        name, bio, published = bios[request.url.path]
+        return httpx.Response(200, text=f"<h2>Blog: {name}(1)</h2><p>{bio}</p><p>{published}</p>")
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr("scout.research.httpx.AsyncClient",
+                        lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    candidates = asyncio.run(stripe_authors())
+    assert [person["name"] for person in candidates] == ["Alex One"]
+    assert candidates[0]["source"] == urls[0]
+    assert "Verify location" in candidates[0]["reason"]
 
 
 def test_expired_gmail_authorization_surfaces_reconnect_in_settings(desk, monkeypatch):
