@@ -8,6 +8,7 @@ import sqlite3
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -357,11 +358,13 @@ def create_app(db_path=None, seed=True):
     @app.get("/api/jobs")
     async def jobs(view: str = "latest", region: str = "", search: str = Query("", max_length=130),
                    latest: bool = False, all_levels: bool = False, offset: int = Query(0, ge=0, le=50000),
-                   early_only: bool = False, recent_days: int = Query(0, ge=0, le=365)):
+                   early_only: bool = False, recent_days: int = Query(0, ge=0, le=365),
+                   date_basis: Literal["either", "posted", "seen"] = "either"):
         if region and region not in REGIONS:
             fail("Unknown location filter.")
         items = store.jobs(view=view, region=region, search=search.strip(), latest=latest,
-                           all_levels=all_levels, offset=offset, early_only=early_only, recent_days=recent_days)
+                           all_levels=all_levels, offset=offset, early_only=early_only, recent_days=recent_days,
+                           date_basis=date_basis)
         return {"items": items[:30], "more": len(items) > 30}
 
     @app.get("/api/jobs/{job_id}")

@@ -101,8 +101,9 @@ async function refreshJobs() {
   const box=$("#job-results");
   if (!box) return;
   const serial=++S.serial, saved=S.page==="saved", hidden=!saved&&S.hidden;
+  const [dateBasis,recentDays]=S.recent==="0"?["either","0"]:S.recent.split("_");
   const params=new URLSearchParams({view:saved?"saved":hidden?"hidden":"latest",region:S.region,search:S.search,latest:S.latest,
-    all_levels:S.levels==="all",early_only:S.levels==="early",recent_days:S.recent,offset:S.offset});
+    all_levels:S.levels==="all",early_only:S.levels==="early",recent_days:recentDays,date_basis:dateBasis,offset:S.offset});
   const {items,more}=await api(`/jobs?${params}`);
   if (!box.isConnected||serial!==S.serial) return;
   box.innerHTML=items.length?`<div class="job-list">${items.map(jobRow).join("")}</div>`:
@@ -147,7 +148,7 @@ function jobPage() {
     <select id="region" aria-label="Location">${select({"":"All locations",...regions},S.region)}</select></div>
     ${saved||hidden?"":`<div class="filters shortlist-filters">
     <select id="levels" aria-label="Experience level">${select({relevant:"Relevant roles",early:"Explicit early-career roles",all:"All experience levels"},S.levels)}</select>
-    <select id="recent" aria-label="Posting age">${select({"0":"Any posting date","7":"Last 7 days","30":"Last 30 days"},S.recent)}</select>
+    <select id="recent" aria-label="Job date filter">${select({"0":"Any date","posted_7":"Posted in last 7 days","posted_30":"Posted in last 30 days","seen_7":"First seen in last 7 days","seen_30":"First seen in last 30 days"},S.recent)}</select>
     <label><input type="checkbox" id="latest" ${S.latest?"checked":""}> New since last scan</label></div>`}
     <div id="job-results" aria-busy="true"><div class="panel loading">Loading jobs…</div></div></div>
     <aside class="aside"><div class="panel" id="coverage-panel">${coverage()}</div><div class="panel"><p class="eyebrow">FROM JOB TO REFERRAL</p>

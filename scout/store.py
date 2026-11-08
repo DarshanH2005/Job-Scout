@@ -243,7 +243,7 @@ class Store:
                               (company_id, *[job[field] for field in JOB_FIELDS], observed, observed, scan_id, manual))
         return result.lastrowid, True
 
-    def jobs(self, *, view, region, search, latest, all_levels, offset, early_only=False, recent_days=0):
+    def jobs(self, *, view, region, search, latest, all_levels, offset, early_only=False, recent_days=0, date_basis="either"):
         args = []
         clauses = []
         if view == "saved":
@@ -260,7 +260,9 @@ class Store:
             if latest:
                 clauses.append("j.new_scan=(SELECT MAX(id) FROM scans WHERE scope='full' AND state='completed')")
             if recent_days:
-                clauses.append("coalesce(julianday(j.posted_at),julianday(j.first_seen))>=julianday('now')-?")
+                date_field = {"either": "coalesce(julianday(j.posted_at),julianday(j.first_seen))",
+                              "posted": "julianday(j.posted_at)", "seen": "julianday(j.first_seen)"}[date_basis]
+                clauses.append(f"{date_field}>=julianday('now')-?")
                 args.append(recent_days)
         if region:
             clauses.append("j.region=?")

@@ -469,6 +469,11 @@ def test_shortlist_experience_and_posting_age(desk):
     store.write("UPDATE jobs SET posted_at='2000-01-01T00:00:00Z' WHERE id=?", (old["id"],))
     assert {row["id"] for row in result(client.get("/api/jobs?early_only=true"))["items"]} == {junior["id"], old["id"]}
     assert [row["id"] for row in result(client.get("/api/jobs?early_only=true&recent_days=7"))["items"]] == [junior["id"]]
+    assert result(client.get("/api/jobs?early_only=true&recent_days=7&date_basis=posted"))["items"] == []
+    assert {row["id"] for row in result(client.get("/api/jobs?early_only=true&recent_days=7&date_basis=seen"))["items"]} == {junior["id"], old["id"]}
+    store.write("UPDATE jobs SET posted_at=datetime('now') WHERE id=?", (old["id"],))
+    assert [row["id"] for row in result(client.get("/api/jobs?early_only=true&recent_days=7&date_basis=posted"))["items"]] == [old["id"]]
+    result(client.get("/api/jobs?date_basis=invalid"), 422)
     assert experienced["score"] == 0
     ranged = build_job("2", "Software Engineer", "", "India", "", "2–4 years of experience.", "https://sample.example/2")
     assert ranged["score"] > 0
