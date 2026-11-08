@@ -441,7 +441,8 @@ async function mailThreads(id) {
   const target=$("#gmail-link"), rows=await api("/gmail/threads");
   if(!target.isConnected) return;
   target.innerHTML=rows.length?`<form class="form" data-form="thread" data-id="${id}"><label>Choose a labeled sent conversation
-  <select name="thread_id" required>${select(Object.fromEntries(rows.map(row=>[row.id,`${row.subject} · ${row.to}`])))}</select></label>
+  <select name="thread_id" required><option value="" selected disabled>Choose a conversation</option>${select(Object.fromEntries(rows.map(row=>[row.id,`${row.subject} · ${row.to}`])))}</select></label>
+  <p class="hint">Save the contact's email above first. The thread must have that one recipient, with no extra Cc or Bcc.</p>
   <div><button class="button">Link thread</button></div></form>`:'<p class="hint">Apply the Job Scout label to your sent conversation in Gmail, then try again.</p>';
 }
 

@@ -24,7 +24,7 @@ API = "https://gmail.googleapis.com/gmail/v1/users/me"
 TOKEN = "https://oauth2.googleapis.com/token"
 REDIRECT = "http://127.0.0.1:8765/oauth/google"
 KEYRING_SERVICE = "Job Scout Gmail"
-HEADERS = ["From", "To", "Subject", "Auto-Submitted", "Precedence", "Content-Type", "In-Reply-To",
+HEADERS = ["From", "To", "Cc", "Bcc", "Subject", "Auto-Submitted", "Precedence", "Content-Type", "In-Reply-To",
            "Message-ID", "References"]
 
 
@@ -202,12 +202,25 @@ class Gmail:
         if not outgoing:
             raise ValueError("Choose a Gmail conversation with a sent message.")
         last = max(outgoing, key=lambda message: int(message.get("internalDate", 0)))
-        recipients = [address.lower() for _, address in getaddresses([headers(last).get("to", "")]) if address]
-        if len(recipients) != 1:
-            raise ValueError("Link a conversation with one recipient.")
+        outgoing_headers = last.get("payload", {}).get("headers", [])
+        def addresses(fields):
+            values = [header.get("value", "") for header in outgoing_headers
+                      if header.get("name", "").lower() in fields]
+            return [address.lower() for _, address in getaddresses(values) if address]
+
+        recipients = addresses({"to"})
+        if len(recipients) != 1 or addresses({"cc", "bcc"}):
+            raise ValueError("Link a conversation with one recipient and no additional Cc or Bcc recipients.")
         with self.store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            contact = conn.execute("""SELECT c.email FROM outreach o JOIN contacts c ON c.id=o.contact_id
+                                      WHERE o.id=?""", (item_id,)).fetchone()
+            if not contact or not contact["email"]:
+                raise ValueError("Save the contact's email before linking a Gmail thread.")
+            if contact["email"].strip().lower() != recipients[0]:
+                raise ValueError("The thread recipient does not match the saved contact email. Review both before linking.")
             changed = conn.execute("""UPDATE outreach SET thread_id=?,mail_account=?,mail_anchor=?,mail_peer=?
-                WHERE id=? AND channel='gmail' AND state='waiting' AND gmail_send_pending='' AND gmail_sent=0""",
+                WHERE id=? AND channel='gmail' AND state='waiting' AND gmail_send_pending='' AND gmail_sent=0 AND thread_id IS NULL""",
                 (thread_id, account, int(last["internalDate"]), recipients[0], item_id))
             if not changed.rowcount:
                 raise ValueError("Record the Gmail send before linking a conversation.")

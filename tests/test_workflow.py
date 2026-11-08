@@ -545,6 +545,46 @@ def message(id, at, sender, subject, labels=None, extra=None):
                                     {"From": sender, "Subject": subject, **(extra or {})}.items()]}}
 
 
+def test_linked_gmail_thread_must_match_saved_single_recipient(desk, monkeypatch):
+    client, store = desk
+    item = action(client, create_draft(client, saved_job(client), "gmail"), "sent")
+    path = f"/api/outreach/{item['id']}"
+    store.set_setting("gmail_account", "me@example.com")
+    outgoing = {"To": "Jane <jane@example.com>"}
+
+    async def token(_self):
+        return "me@example.com", "fake-token"
+
+    async def label(_self, _token, _name):
+        return "job-scout-label"
+
+    async def thread(_self, _token, _id):
+        return {"messages": [message("sent", 101, "me@example.com", "Referral",
+                                      labels=["SENT", "job-scout-label"], extra=outgoing)]}
+
+    monkeypatch.setattr(Gmail, "token", token)
+    monkeypatch.setattr(Gmail, "_label", label)
+    monkeypatch.setattr(Gmail, "thread", thread)
+    link = {"thread_id": "thread-one"}
+    assert "Save the contact" in result(client.post(path + "/gmail", json=link), 409)["detail"]
+    result(client.patch(path + "/contact-handoff", json={"email": "other@example.com"}))
+    assert "does not match" in result(client.post(path + "/gmail", json=link), 409)["detail"]
+    result(client.patch(path + "/contact-handoff", json={"email": "Jane@example.com"}))
+    outgoing["Cc"] = "other@example.com"
+    assert "Cc or Bcc" in result(client.post(path + "/gmail", json=link), 409)["detail"]
+    outgoing.pop("Cc")
+    outgoing["Bcc"] = "other@example.com"
+    assert "Cc or Bcc" in result(client.post(path + "/gmail", json=link), 409)["detail"]
+    outgoing.pop("Bcc")
+    outgoing["Cc"] = outgoing.pop("To")
+    assert "Cc or Bcc" in result(client.post(path + "/gmail", json=link), 409)["detail"]
+    outgoing["To"] = outgoing.pop("Cc")
+    linked = result(client.post(path + "/gmail", json=link))
+    assert linked["thread_id"] == "thread-one" and linked["mail_peer"] == "jane@example.com"
+    result(client.post(path + "/gmail", json={"thread_id": "thread-two"}), 409)
+    assert result(client.get(path))["thread_id"] == "thread-one"
+
+
 def test_gmail_clears_follow_up_but_linkedin_email_is_a_hint(desk, monkeypatch):
     client, store = desk
     job = saved_job(client)

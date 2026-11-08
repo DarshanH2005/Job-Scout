@@ -816,11 +816,14 @@ def create_app(db_path=None, seed=True):
     @app.post("/api/outreach/{item_id}/gmail")
     async def link_thread(item_id: int, data: ThreadLink):
         try:
-            await gmail.link(item_id, data.thread_id)
-            return store.outreach(item_id)
+            async with gmail.lock:
+                await gmail.link(item_id, data.thread_id)
+                return store.outreach(item_id)
         except sqlite3.IntegrityError:
             fail("That Gmail thread is already linked to a conversation.", 409)
-        except (ValueError, httpx.HTTPError, OSError, ImportError, RuntimeError) as exc:
+        except ValueError as exc:
+            fail(str(exc), 409)
+        except (httpx.HTTPError, OSError, ImportError, RuntimeError) as exc:
             fail(mail_failure(exc), 502)
 
     @app.patch("/api/gmail/options")
