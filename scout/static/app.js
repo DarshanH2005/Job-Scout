@@ -312,8 +312,10 @@ async function findPeople(id) {
     target.innerHTML=`${S.people.map((p,index)=>{
       const existing=(S.job.referrals||[]).find(i=>i.contact_id===p.id&&!["closed","submitted"].includes(i.state));
       const action=existing?B("Continue referral","job-conversation",existing.id,"small"):B("Use this person","person",index,"small");
+      const profile=linkedinProfile(p.profile_url);
+      const personSearch=`https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(`${p.name} ${S.job.company}`)}`;
       return `<div class="person"><strong>${E(p.name)}</strong><p>${E(p.title)}</p><p>${E(p.reason)}</p><p>${E(p.notes)}</p>
-      <div class="actions">${p.source?L("View source",p.source):""}${action}</div></div>`;
+      <div class="actions">${L(profile?"Open LinkedIn profile":"Find person on LinkedIn",profile||personSearch)}${p.source?L("View source",p.source):""}${action}</div></div>`;
     }).join("")}
     ${hint?`<p class="hint">${E(hint)}</p>`:""}<div class="actions">
     ${L("Search LinkedIn",`https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(S.query)}`)}${B("Copy search query","copy-query","","small")}</div>`;
@@ -339,13 +341,15 @@ function followUpText(item) {
   const first = item.person.split(/\s+/)[0];
   return `Hi ${first}, I wanted to follow up on my referral request for the ${item.job_title} role at ${item.company}. If you’re able to point me in the right direction, I’d appreciate it.\n\nThanks again!`;
 }
-function handoffLinks(item) {
-  let profile = "";
-  const candidate=item.profile_url||item.source;
-  if (item.channel === "linkedin" && candidate && URL.canParse(candidate)) {
+function linkedinProfile(candidate) {
+  if (candidate && URL.canParse(candidate)) {
     const source = new URL(candidate);
-    if (source.protocol === "https:" && (source.hostname === "linkedin.com" || source.hostname.endsWith(".linkedin.com")) && /^\/in\/[^/]+/.test(source.pathname)) profile = source.href;
+    if (source.protocol === "https:" && (source.hostname === "linkedin.com" || source.hostname.endsWith(".linkedin.com")) && /^\/in\/[^/]+/.test(source.pathname)) return source.href;
   }
+  return "";
+}
+function handoffLinks(item) {
+  const profile=item.channel === "linkedin" ? linkedinProfile(item.profile_url||item.source) : "";
   let channel = "";
   if (item.conversation_url) channel = L("Open conversation",item.conversation_url);
   else if (item.channel === "gmail" && item.thread_id && item.mail_account) {
