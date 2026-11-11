@@ -727,6 +727,87 @@ def test_smartrecruiters_rejects_incomplete_snapshot():
     assert not jobs and error
 
 
+@pytest.mark.parametrize("case", ["complete", "zero_total", "capped", "missing", "shifting", "duplicate", "unsafe_path", "first_changed"])
+def test_workday_requires_complete_stable_snapshot(case):
+    import json
+    calls = []
+    paths = ["/job/India-Bangalore/Junior-Software-Engineer_R1", "/job/US/Software-Engineer_R2"]
+
+    def respond(request):
+        assert request.method == "POST" and request.url.host == "sample.wd5.myworkdayjobs.com"
+        offset = json.loads(request.content)["offset"]
+        calls.append(offset)
+        total = 2000 if case == "capped" else 3 if case == "shifting" and offset else 0 if case == "zero_total" and offset else 2
+        path = paths[0] if not offset or case == "duplicate" else paths[1]
+        if case == "first_changed" and not offset and len(calls) > 1:
+            path = paths[1]
+        if case == "unsafe_path":
+            path = "/job/%2e%2e/evil"
+        rows = [] if case == "missing" and offset else [{"title":"Junior Software Engineer", "externalPath":path,
+                                                         "locationsText":"Bengaluru, India", "postedOn":"Posted Today"}]
+        return httpx.Response(200, json={"total":total, "jobPostings":rows})
+
+    async def read():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await fetch_board(client, {"provider":"workday", "board":"sample.wd5.External"}, asyncio.Semaphore(1))
+
+    jobs, error = asyncio.run(read())
+    if case in {"complete", "zero_total"}:
+        assert not error and calls == [0, 1, 0] and len(jobs) == 2
+        assert jobs[0]["region"] == "india" and jobs[0]["posted_at"] is None
+        assert jobs[0]["url"] == "https://sample.wd5.myworkdayjobs.com/External" + paths[0]
+    else:
+        assert not jobs and error
+        if case == "capped":
+            assert "capped" in error
+
+
+def test_workday_details_are_checked_and_loaded_on_demand(desk, monkeypatch):
+    client, store = desk
+    job = saved_job(client)
+    path = "/job/India-Bangalore/Junior-Data-Engineer_R1"
+    url = "https://sample.wd5.myworkdayjobs.com/External" + path
+    store.write("UPDATE companies SET provider='workday',board='sample.wd5.External' WHERE id=?", (job["company_id"],))
+    store.write("UPDATE jobs SET external_id=?,url=?,manual=0,description='',location='2 Locations',region='other',evidence='2 Locations' WHERE id=?",
+                (path, url, job["id"]))
+    detail = {"jobPostingInfo":{"externalUrl":url, "canApply":True, "location":"Bengaluru, India", "additionalLocations":["Pune, India"],
+              "jobDescription":"<h2>Minimum requirements</h2><p>3+ years of experience.</p><p>Must be authorized to work in India.</p>"}}
+    status = [200]
+
+    def respond(request):
+        assert request.url.host == "sample.wd5.myworkdayjobs.com"
+        return httpx.Response(status[0], json=detail)
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr("scout.app.httpx.AsyncClient",
+                        lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    loaded = result(client.get(f"/api/jobs/{job['id']}"))
+    assert loaded["details_status"] == "loaded" and "3+ years" in loaded["detail_assessment"]
+    assert loaded["detail_location"]["region"] == "india"
+    assert loaded["work_authorization"] == ["Must be authorized to work in India."]
+    assert store.job(job["id"])["description"] == ""
+    assert result(client.post(f"/api/jobs/{job['id']}/verify"))["status"] == "listed"
+    detail["jobPostingInfo"]["canApply"] = False
+    assert result(client.post(f"/api/jobs/{job['id']}/verify"))["status"] == "unavailable"
+    detail["jobPostingInfo"]["externalUrl"] = "https://other.example/job/different"
+    assert result(client.get(f"/api/jobs/{job['id']}"))["details_status"] == "unavailable"
+    status[0] = 404
+    assert result(client.post(f"/api/jobs/{job['id']}/verify"))["status"] == "not_listed"
+
+
+def test_workday_source_migration_preserves_customized_company(tmp_path):
+    store = Store(tmp_path / "migration.sqlite3")
+    store.initialize(seed=True)
+    store.write("UPDATE companies SET provider='',board='',status='unsupported' WHERE name='Adobe'")
+    store.write("UPDATE companies SET provider='',board='',url='https://custom.example/jobs' WHERE name='Intel'")
+    store.write("DELETE FROM settings WHERE key='sources_workday_1'")
+    store.initialize(seed=True)
+    assert store.one("SELECT provider,board FROM companies WHERE name='Adobe'") == {
+        "provider":"workday", "board":"adobe.wd5.external_experienced"}
+    assert store.one("SELECT provider,url FROM companies WHERE name='Intel'") == {
+        "provider":"", "url":"https://custom.example/jobs"}
+
+
 def test_shortlist_experience_and_posting_age(desk):
     client, store = desk
     junior = saved_job(client)
@@ -823,6 +904,7 @@ def test_location_evidence_includes_required_time_zone():
         "unclear", "Massachusetts - Boston · remote · " + requirement)
     assert geography("Remote - US", "", requirement) == ("us_remote", "Remote - US · " + requirement)
     assert geography("Bangalore, India", "", "Meetings are held in the PST timezone.") == ("india", "Bangalore, India")
+    assert geography("3 Locations", "", "") == ("unclear", "3 Locations")
 
 
 def test_existing_jobs_gain_time_zone_evidence(desk):

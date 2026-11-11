@@ -10,6 +10,7 @@ from .feeds import EARLY_SCORE, assess, eligibility_evidence, required_timezone,
 
 DATA = Path(__file__).with_name("companies.csv")
 EXPANDED_SOURCES = ("Databricks", "HP", "ServiceNow", "Snowflake", "Zscaler")
+WORKDAY_SOURCES = ("Adobe", "Intel", "Salesforce", "Workday")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS companies (
@@ -176,6 +177,14 @@ class Store:
                          for row in csv.DictReader(handle) if row["name"] in EXPANDED_SOURCES),
                     )
                 conn.execute("INSERT INTO settings VALUES('sources_2','1')")
+            if seed and not conn.execute("SELECT 1 FROM settings WHERE key='sources_workday_1'").fetchone():
+                with DATA.open(encoding="utf-8-sig", newline="") as handle:
+                    conn.executemany(
+                        "UPDATE companies SET provider=?,board=?,status='pending',note='' WHERE name=? AND url=? AND provider='' AND board=''",
+                        ((row["provider"], row["board"], row["name"], row["url"])
+                         for row in csv.DictReader(handle) if row["name"] in WORKDAY_SOURCES),
+                    )
+                conn.execute("INSERT INTO settings VALUES('sources_workday_1','1')")
 
     def one(self, sql, params=()):
         with self.connect() as conn:

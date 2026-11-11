@@ -2,7 +2,7 @@ name,url,provider,board
 a16z,https://jobs.ashbyhq.com/a16z,ashby,a16z
 Abnormal AI,https://job-boards.greenhouse.io/abnormalsecurity,greenhouse,abnormalsecurity
 Abridge,https://jobs.ashbyhq.com/abridge,ashby,abridge
-Adobe,https://careers.adobe.com/us/en/search-results,,
+Adobe,https://careers.adobe.com/us/en/search-results,workday,adobe.wd5.external_experienced
 Affirm,https://job-boards.greenhouse.io/affirm,greenhouse,affirm
 Airbnb,https://job-boards.greenhouse.io/airbnb,greenhouse,airbnb
 Airtable,https://job-boards.greenhouse.io/airtable,greenhouse,airtable
@@ -81,7 +81,7 @@ HP,https://jobs.hp.com/,greenhouse,hp
 IBM,https://www.ibm.com/careers/search,,
 Included Health,https://jobs.lever.co/includedhealth,lever,includedhealth
 Instacart,https://job-boards.greenhouse.io/instacart,greenhouse,instacart
-Intel,https://jobs.intel.com/,,
+Intel,https://jobs.intel.com/,workday,intel.wd1.External
 Intuit,https://jobs.intuit.com/search-jobs,,
 JPMorganChase,https://careers.jpmorgan.com/us/en/home,,
 Juniper Networks,https://careers.hpe.com/us/en/,,
@@ -148,7 +148,7 @@ Riot Games,https://job-boards.greenhouse.io/riotgames,greenhouse,riotgames
 Robinhood,https://job-boards.greenhouse.io/robinhood,greenhouse,robinhood
 Roblox,https://job-boards.greenhouse.io/roblox,greenhouse,roblox
 Roboflow,https://jobs.ashbyhq.com/roboflow,ashby,roboflow
-Salesforce,https://careers.salesforce.com/en/jobs/,,
+Salesforce,https://careers.salesforce.com/en/jobs/,workday,salesforce.wd12.External_Career_Site
 Samsara,https://job-boards.greenhouse.io/samsara,greenhouse,samsara
 Sardine,https://jobs.ashbyhq.com/sardine,ashby,sardine
 Scale AI,https://job-boards.greenhouse.io/scaleai,greenhouse,scaleai
@@ -191,7 +191,7 @@ Walmart,https://careers.walmart.com/,,
 Warp,https://jobs.ashbyhq.com/warp,ashby,warp
 Waymo,https://job-boards.greenhouse.io/waymo,greenhouse,waymo
 Wealthfront,https://jobs.lever.co/wealthfront,lever,wealthfront
-Workday,https://workday.wd5.myworkdayjobs.com/Workday,,
+Workday,https://workday.wd5.myworkdayjobs.com/Workday,workday,workday.wd5.Workday
 WorkOS,https://jobs.ashbyhq.com/workos,ashby,workos
 Zip,https://jobs.ashbyhq.com/zip,ashby,zip
 Zipline,https://job-boards.greenhouse.io/flyzipline,greenhouse,flyzipline

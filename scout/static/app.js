@@ -254,8 +254,8 @@ function employer(id) {
   dialog(row?"Edit employer":"Add an employer","Use a board identifier for automated scans.",`<form class="form" data-form="company" data-id="${row?.id||""}">
   <label>Company<input name="name" value="${E(row?.name)}" maxlength="130" required></label>
   <label>Employer careers URL<input type="url" name="url" value="${E(row?.url)}" required></label>
-  <label>Feed provider<select name="provider">${select({"":"Manual careers page",greenhouse:"Greenhouse",lever:"Lever",ashby:"Ashby",smartrecruiters:"SmartRecruiters"},row?.provider)}</select></label>
-  <label>Board identifier<input name="board" value="${E(row?.board)}" maxlength="120" placeholder="Example: linear"></label>
+  <label>Feed provider<select name="provider">${select({"":"Manual careers page",greenhouse:"Greenhouse",lever:"Lever",ashby:"Ashby",smartrecruiters:"SmartRecruiters",workday:"Workday"},row?.provider)}</select></label>
+  <label>Board identifier<input name="board" value="${E(row?.board)}" maxlength="120" placeholder="Example: linear or adobe.wd5.external_experienced"></label>
   <label class="checklabel"><input type="checkbox" name="enabled" ${!row||row.enabled?"checked":""}> Include on the active watchlist</label>
   <div><button class="button primary">Save employer</button></div></form>`);
 }

@@ -5,7 +5,7 @@ import html
 import re
 from datetime import date, datetime
 from html.parser import HTMLParser
-from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit, urlunsplit
 
 import httpx
 
@@ -14,6 +14,7 @@ PROVIDERS = {
     "lever": "https://api.lever.co/v0/postings/{board}?mode=json",
     "ashby": "https://api.ashbyhq.com/posting-api/job-board/{board}",
     "smartrecruiters": "https://api.smartrecruiters.com/v1/companies/{board}/postings",
+    "workday": "workday",
 }
 REGIONS = {
     "india_remote": "Remote from India",
@@ -22,6 +23,12 @@ REGIONS = {
     "unclear": "Eligibility unclear",
     "other": "Other location",
 }
+
+
+class WorkdaySnapshotError(ValueError):
+    """A Workday response cannot be treated as a complete source snapshot."""
+
+
 INDIA = re.compile(r"\b(india|bengaluru|bangalore|hyderabad|gurugram|gurgaon|pune|mumbai|chennai|noida|delhi|kolkata|ahmedabad)\b", re.I)
 US = re.compile(r"\b(?:(?i:united states|north america|us-only)|U\.?S\.?A?\.?)\b")
 WORLDWIDE = re.compile(r"\b(worldwide|work from anywhere in the world|globally remote|remote globally|remote anywhere in the world)\b", re.I)
@@ -154,6 +161,26 @@ def board_from_job_url(value):
     return None
 
 
+def workday_base(board):
+    match = re.fullmatch(r"([A-Za-z0-9_-]+)\.(wd[0-9]+)\.([A-Za-z0-9_-]+)", board)
+    if not match:
+        raise ValueError("Use a Workday identifier like adobe.wd5.external_experienced.")
+    tenant, shard, site = match.groups()
+    host = f"https://{tenant}.{shard}.myworkdayjobs.com"
+    return f"{host}/wday/cxs/{tenant}/{site}", f"{host}/{site}"
+
+
+def workday_path(value):
+    if not isinstance(value, str) or not value.startswith("/job/"):
+        raise ValueError("Invalid Workday posting path.")
+    path = urlsplit(value)
+    if path.scheme or path.netloc or path.query or path.fragment or any(part in {".", ".."} for part in unquote(path.path).split("/")):
+        raise ValueError("Invalid Workday posting path.")
+    if not re.fullmatch(r"/job/[A-Za-z0-9_~.%()!,$'@+\-/]+", value):
+        raise ValueError("Invalid Workday posting path.")
+    return value
+
+
 def required_timezone(description):
     lines = re.split(r"\n|(?<=[.!?])\s+(?=[A-Z])", description[:18000])
     return next((line.strip() for line in lines if len(line) < 300 and TIME_ZONE_REQUIREMENT.search(line)), "")
@@ -173,6 +200,8 @@ def geography(location, workplace, description):
     office = next((line for line in lines if len(line) < 420 and FULL_TIME_OFFICE.search(line)), None)
     if office:
         return ("india" if INDIA.search(location) or INDIA.search(office) else "other"), evidence_with_timezone(office)
+    if re.fullmatch(r"\d+\s+locations?", location, re.I):
+        return "unclear", evidence_with_timezone(source)
     if INDIA.search(location):
         india_remote = bool(REMOTE.search(workplace)) or any(
             INDIA.search(part) and REMOTE.search(part) for part in re.split(r"[;|]", location)
@@ -341,9 +370,21 @@ def build_job(external_id, title, department, location, workplace, description, 
 
 async def fetch_board(client, company, limit):
     provider = company["provider"]
-    url = PROVIDERS[provider].format(board=quote(company["board"], safe=""))
     async with limit:
         try:
+            if provider == "workday":
+                base, public_base = workday_base(company["board"])
+                rows = await workday_postings(client, base)
+                jobs = []
+                for row in rows:
+                    path = workday_path(row["externalPath"])
+                    title = clean(row.get("title"))
+                    if not title:
+                        raise ValueError("Workday returned a posting without a title.")
+                    remote = "Remote" if str(row.get("remoteType", "")).casefold() == "remote" else ""
+                    jobs.append(build_job(path, title, "", row.get("locationsText"), remote, "", public_base + path))
+                return jobs, None
+            url = PROVIDERS[provider].format(board=quote(company["board"], safe=""))
             if provider == "smartrecruiters":
                 rows = await smartrecruiters_postings(client, url)
             else:
@@ -357,16 +398,18 @@ async def fetch_board(client, company, limit):
             return jobs, None
         except httpx.HTTPStatusError as exc:
             return [], f"Employer feed returned HTTP {exc.response.status_code}."
+        except WorkdaySnapshotError as exc:
+            return [], str(exc)
         except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
             return [], "Employer feed could not be read."
         finally:
             await asyncio.sleep(0.15)
 
 
-async def fetch_json(client, url, params=None):
+async def fetch_json(client, url, params=None, json_body=None):
     for attempt in range(2):
         try:
-            response = await client.get(url, params=params)
+            response = await client.post(url, json=json_body) if json_body is not None else await client.get(url, params=params)
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as exc:
@@ -380,6 +423,37 @@ async def fetch_json(client, url, params=None):
             if attempt:
                 raise
             await asyncio.sleep(0.4)
+
+
+async def workday_postings(client, base):
+    rows, expected, first_paths = [], None, None
+    async def page_at(offset):
+        return await fetch_json(client, base + "/jobs", json_body={
+            "appliedFacets": {}, "limit": 20, "offset": offset, "searchText": ""})
+    while True:
+        page = await page_at(len(rows))
+        postings, total = page["jobPostings"], page["total"]
+        if not isinstance(postings, list) or not isinstance(total, int) or total < 0:
+            raise WorkdaySnapshotError("Workday returned an invalid page.")
+        if total >= 2000:
+            raise WorkdaySnapshotError("Workday's result count is capped; this feed cannot be scanned completely.")
+        if expected is None:
+            expected = total
+            first_paths = [workday_path(row["externalPath"]) for row in postings]
+        elif total not in (0, expected):
+            raise WorkdaySnapshotError("Workday pagination was incomplete or changed. Retry this feed.")
+        if (not postings and len(rows) < expected) or len(rows) + len(postings) > expected:
+            raise WorkdaySnapshotError("Workday pagination was incomplete or changed. Retry this feed.")
+        rows.extend(postings)
+        if len(rows) == expected:
+            if len({workday_path(row["externalPath"]) for row in rows}) != len(rows):
+                raise WorkdaySnapshotError("Workday pagination was incomplete or changed. Retry this feed.")
+            if len(rows) > len(first_paths):
+                first = await page_at(0)
+                if (first.get("total") != expected or not isinstance(first.get("jobPostings"), list)
+                        or [workday_path(row["externalPath"]) for row in first["jobPostings"]] != first_paths):
+                    raise WorkdaySnapshotError("Workday pagination was incomplete or changed. Retry this feed.")
+            return rows
 
 
 async def smartrecruiters_postings(client, url):

@@ -21,7 +21,7 @@ from pydantic import AwareDatetime, BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import credentials
-from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, public_url, work_authorization_evidence
+from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, public_url, work_authorization_evidence, workday_base, workday_path
 from .gmail import Gmail, headers, incoming_reply
 from .research import ResearchCache, find_people, rewrite
 from .store import OUTREACH_SELECT, Store, now
@@ -170,7 +170,7 @@ class Scanner:
         return self.store.one("SELECT * FROM scans WHERE id=?", (scan_id,))
 
     async def run(self, scan_id, companies, baseline_id):
-        limits = {provider: asyncio.Semaphore(4) for provider in PROVIDERS}
+        limits = {provider: asyncio.Semaphore(2 if provider == "workday" else 4) for provider in PROVIDERS}
         unsupported = len([row for row in companies if row["provider"] not in PROVIDERS])
         self.store.write("UPDATE scans SET unsupported=? WHERE id=?", (unsupported, scan_id))
         state, note = "completed", ""
@@ -337,6 +337,11 @@ def create_app(db_path=None, seed=True):
         board = data.board.strip()
         if provider and (provider not in PROVIDERS or not re.fullmatch(r"[A-Za-z0-9._-]+", board)):
             fail("Select a supported provider and enter its board identifier.")
+        if provider == "workday":
+            try:
+                workday_base(board)
+            except ValueError as exc:
+                fail(str(exc))
         name = data.name.strip() or fail("Enter the company name.")
         url = required_url(data.url)
         try:
@@ -384,39 +389,53 @@ def create_app(db_path=None, seed=True):
     @app.get("/api/jobs/{job_id}")
     async def job(job_id: int):
         item = job_or_404(store, job_id)
-        if item["provider"] != "smartrecruiters" or item["description"]:
+        if item["provider"] not in {"smartrecruiters", "workday"} or item["description"]:
             return item
         company = store.one("SELECT board FROM companies WHERE id=?", (item["company_id"],))
         if not company or not re.fullmatch(r"[A-Za-z0-9._-]+", company["board"]):
             item["details_status"] = "unavailable"
             return item
-        url = PROVIDERS["smartrecruiters"].format(board=quote(company["board"], safe=""))
-        url += "/" + quote(item["external_id"], safe="")
         try:
+            if item["provider"] == "workday":
+                base, public_base = workday_base(company["board"])
+                path = workday_path(item["external_id"])
+                url = base + path
+            else:
+                url = PROVIDERS["smartrecruiters"].format(board=quote(company["board"], safe=""))
+                url += "/" + quote(item["external_id"], safe="")
             async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
                 detail = await fetch_json(client, url)
-            if (str(detail["id"]) != item["external_id"] or detail.get("active") is False
-                    or detail["company"]["identifier"].casefold() != company["board"].casefold()):
-                raise ValueError("The employer posting did not match.")
-            sections = detail["jobAd"]["sections"]
-            parts = []
-            for key in ("companyDescription", "jobDescription", "qualifications", "additionalInformation"):
-                section = sections.get(key) or {}
-                title, text = clean(section.get("title")), clean(section.get("text"))
-                if text:
-                    parts.append("\n".join(filter(None, (title, text))))
-            description = "\n".join(parts)[:30000]
+            detail_location = item["location"]
+            if item["provider"] == "workday":
+                info = detail["jobPostingInfo"]
+                if canonical_url(info["externalUrl"]) != canonical_url(public_base + path):
+                    raise ValueError("The employer posting did not match.")
+                description = clean(info.get("jobDescription"))[:30000]
+                detail_location = ", ".join(dict.fromkeys(filter(None, [info.get("location"), *(info.get("additionalLocations") or [])])))
+                workplace = "Remote" if str(info.get("remoteType", "")).casefold() == "remote" else ""
+            else:
+                if (str(detail["id"]) != item["external_id"] or detail.get("active") is False
+                        or detail["company"]["identifier"].casefold() != company["board"].casefold()):
+                    raise ValueError("The employer posting did not match.")
+                sections = detail["jobAd"]["sections"]
+                parts = []
+                for key in ("companyDescription", "jobDescription", "qualifications", "additionalInformation"):
+                    section = sections.get(key) or {}
+                    title, text = clean(section.get("title")), clean(section.get("text"))
+                    if text:
+                        parts.append("\n".join(filter(None, (title, text))))
+                description = "\n".join(parts)[:30000]
+                location = detail.get("location") or {}
+                workplace = "Hybrid" if location.get("hybrid") else "Remote" if location.get("remote") else ""
             if not description:
                 raise ValueError("The employer posting contained no description.")
             item["description"] = description
             item["eligibility"] = eligibility_evidence(description)
             item["work_authorization"] = work_authorization_evidence(description)
-            location = detail.get("location") or {}
-            workplace = "Hybrid" if location.get("hybrid") else "Remote" if location.get("remote") else ""
             if not workplace:
                 workplace = next((value for value in ("Remote", "Hybrid")
                                   if item["evidence"] == f'{item["location"]} · {value}'), "")
-            region, evidence = geography(item["location"], workplace, description)
+            region, evidence = geography(detail_location or item["location"], workplace, description)
             if region != item["region"] or evidence != item["evidence"]:
                 item["detail_location"] = {"region": region, "evidence": evidence}
             detailed_score, detailed_reason = assess(item["title"], item["department"], description, item["region"])
@@ -433,6 +452,25 @@ def create_app(db_path=None, seed=True):
         company = store.one("SELECT * FROM companies WHERE id=?", (saved["company_id"],))
         if saved["manual"] or company["provider"] not in PROVIDERS:
             return {"status": "manual", "checked_at": None, "detail": "Open the posting to verify this manually added role."}
+        if company["provider"] == "workday":
+            stamp = now()
+            try:
+                base, public_base = workday_base(company["board"])
+                path = workday_path(saved["external_id"])
+                async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+                    detail = await fetch_json(client, base + path)
+                info = detail["jobPostingInfo"]
+                if canonical_url(info["externalUrl"]) != canonical_url(public_base + path):
+                    raise ValueError("The employer posting did not match.")
+                if info.get("canApply") is not True:
+                    return {"status":"unavailable", "checked_at":stamp, "detail":"The employer did not confirm that applications are open."}
+                return {"status":"listed", "checked_at":stamp, "detail":"The employer's posting is accepting applications."}
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    return {"status":"not_listed", "checked_at":stamp, "detail":"The employer posting was not found."}
+                return {"status":"unavailable", "checked_at":stamp, "detail":"The employer posting could not be checked."}
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+                return {"status":"unavailable", "checked_at":stamp, "detail":"The employer posting could not be checked."}
         async with httpx.AsyncClient(timeout=12) as client:
             postings, error = await fetch_board(client, company, asyncio.Semaphore(1))
         stamp = now()
