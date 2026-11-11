@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import scout.app as app_module
 from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, normalize, work_authorization_evidence
 from scout.gmail import Gmail, SEND_SCOPE, SCOPE, incoming_reply
-from scout.research import ResearchCache, cloudflare_authors, datadog_speakers, public_candidates, rank_candidates, stripe_authors
+from scout.research import ResearchCache, affirm_authors, cloudflare_authors, datadog_speakers, public_candidates, rank_candidates, stripe_authors
 from scout.store import Store
 
 
@@ -329,6 +329,43 @@ def test_datadog_speakers_require_recent_employer_and_engineering_role(monkeypat
     assert str(year) in candidates[0]["reason"] and "Verify" in candidates[0]["reason"]
     html = html.replace(str(year), str(year - 3))
     assert asyncio.run(datadog_speakers()) == []
+
+
+def test_affirm_feed_requires_recent_named_technical_byline_and_official_source(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    now = datetime.now(timezone.utc)
+    def entry(byline, *, age=0, link="https://tech.affirm.com/post?source=rss"):
+        published = format_datetime(now - timedelta(days=age))
+        return (f"<item><title>Building Data Systems</title><link>{link.replace('&', '&amp;')}</link>"
+                f"<pubDate>{published}</pubDate><content:encoded><![CDATA[<p>{byline}</p>]]></content:encoded></item>")
+    rss = '<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel>' + "".join([
+        entry("Authors: Alex One, Blair Two, Data Platform, Affirm"),
+        entry("Author: Helen Eight, Checkout Engineering, Affirm"),
+        entry("Author: Ines Nine, Machine Learning &amp; Decision Platform, Affirm"),
+        entry("Author: Jules Ten, Machine Learning and Decision Platform, Affirm"),
+        entry("Author: Alex One, Data Platform, Affirm"),
+        entry("Author: Casey Three, Data Platform, Affirm", age=800),
+        entry("Author: Dana Four, Data Platform, Affirm", age=-1),
+        entry("Author: Erin Five, Data Platform, Affirm", link="https://other.example/post"),
+        entry("Author: Fran Six, Product Marketing, Affirm"),
+        entry("Author: Team Blog, Data Platform, Affirm"),
+        entry("Author: Grace Seven, Data Platform"),
+    ]) + "</channel></rss>"
+
+    def respond(request):
+        assert str(request.url) == "https://tech.affirm.com/feed"
+        return httpx.Response(200, content=rss.encode())
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr("scout.research.httpx.AsyncClient",
+                        lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    people = asyncio.run(affirm_authors())
+    assert [person["name"] for person in people] == ["Alex One", "Helen Eight", "Ines Nine", "Blair Two", "Jules Ten"]
+    assert all(person["source"] == "https://tech.affirm.com/post" for person in people)
+    assert people[0]["title"] == "Author · Data Platform" and people[1]["title"] == "Author · Checkout Engineering"
+    assert "Verify their current role" in people[0]["reason"]
 
 
 def test_contact_ranking_explains_related_area_without_claiming_same_team():

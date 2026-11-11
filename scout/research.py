@@ -5,9 +5,10 @@ import re
 import asyncio
 import time
 import unicodedata
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from xml.etree import ElementTree
 
 import httpx
@@ -23,6 +24,7 @@ STRIPE_SITEMAP = "https://stripe.dev/sitemap.xml"
 STRIPE_ENGINEERING = "https://stripe.dev/blog/topic/engineering"
 CLOUDFLARE_BLOG = "https://blog.cloudflare.com/"
 DATADOG_SPEAKERS = "https://dash.datadoghq.com/sessions/speakers/"
+AFFIRM_FEED = "https://tech.affirm.com/feed"
 OFFICIAL_CACHE_SECONDS = 15 * 60
 ROLE_AREAS = {
     "infrastructure": re.compile(r"\b(?:infrastructure|platform|systems?|kubernetes|cloud|devops|sre)\b", re.I),
@@ -205,10 +207,59 @@ async def datadog_speakers():
     return people
 
 
+async def affirm_authors():
+    """Read named authors and their stated technical teams from Affirm's public feed."""
+    async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+        response = await client.get(AFFIRM_FEED)
+        response.raise_for_status()
+    root = ElementTree.fromstring(response.content)
+    people, seen = [], set()
+    today = datetime.now(timezone.utc).date()
+    for item in root.findall("./channel/item")[:30]:
+        try:
+            published = parsedate_to_datetime(item.findtext("pubDate", "")).date()
+        except (ValueError, TypeError, IndexError, OverflowError):
+            continue
+        if not today - timedelta(days=730) <= published <= today:
+            continue
+        link = urlsplit(item.findtext("link", ""))
+        if link.scheme != "https" or link.hostname != "tech.affirm.com" or not link.path.strip("/"):
+            continue
+        source = urlunsplit(("https", "tech.affirm.com", link.path, "", ""))
+        content = next((node.text or "" for node in item if node.tag.endswith("}encoded")), "")
+        lines = clean(content).splitlines()
+        byline = re.fullmatch(r"Authors?:\s*(.+),\s*Affirm", lines[0], re.I) if lines else None
+        if not byline:
+            continue
+        parts = [part.strip() for part in byline[1].split(",")]
+        if len(parts) < 2 or len(parts) > 9:
+            continue
+        team = parts[-1]
+        if not re.search(r"\b(?:engineering|platform|infrastructure|developer productivity|data)\b", team, re.I):
+            continue
+        names = parts[:-1]
+        if not all(NAME.fullmatch(name) and not CONTENT_TITLE.search(name) for name in names):
+            continue
+        title = clean(item.findtext("title", ""))[:200]
+        for name in names:
+            if name.casefold() in seen:
+                continue
+            people.append(dict(name=name, title=f"Author · {team}"[:200], source=source,
+                               notes=f"Affirm tech blog: {title}"[:350],
+                               reason=f"Affirm credited this person and team in a {published.isoformat()} post. Verify their current role and location."))
+            seen.add(name.casefold())
+    first_by_team, remaining, teams = [], [], set()
+    for person in people:
+        team = " ".join(person["title"].casefold().replace("&", "and").split())
+        (remaining if team in teams else first_by_team).append(person)
+        teams.add(team)
+    return first_by_team + remaining
+
+
 class ResearchCache:
     def __init__(self):
         self.entries = {}
-        self.locks = {company: asyncio.Lock() for company in ("stripe", "cloudflare", "datadog")}
+        self.locks = {company: asyncio.Lock() for company in ("stripe", "cloudflare", "datadog", "affirm")}
 
     async def authors(self, company, search):
         async with self.locks[company]:
@@ -251,7 +302,8 @@ async def find_people(store, job, cache=None):
                 status = "unavailable"
         else:
             status = "needs_key"
-    official_sources = {"stripe": stripe_authors, "cloudflare": cloudflare_authors, "datadog": datadog_speakers}
+    official_sources = {"stripe": stripe_authors, "cloudflare": cloudflare_authors,
+                        "datadog": datadog_speakers, "affirm": affirm_authors}
     company = job["company"].casefold()
     official_search = official_sources.get(company)
     official_cached = False
