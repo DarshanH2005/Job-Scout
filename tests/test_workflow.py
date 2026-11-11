@@ -110,6 +110,80 @@ def test_gmail_direct_send_and_follow_up_track_the_original_thread(desk, monkeyp
     assert replied["state"] == "replied" and replied["due_at"] is None and len(sent) == 2
 
 
+def test_initial_gmail_send_can_schedule_a_reply_aware_follow_up(desk, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    client, store = desk
+    item = create_draft(client, saved_job(client), "gmail")
+    path = f"/api/outreach/{item['id']}"
+    result(client.patch(path + "/contact-handoff", json={"email":"Jane@example.com"}))
+    store.set_setting("gmail_account", "me@example.com")
+    store.set_setting("gmail_send_enabled", "1")
+    sent = []
+
+    async def token(self, send=False):
+        return "me@example.com", "fake-token"
+
+    async def send(token, message, thread_id=None):
+        sent.append(message.get_content().strip())
+        return {"id":"sent-one", "threadId":"thread-one"}
+
+    async def thread(self, token, thread_id):
+        assert thread_id == "thread-one"
+        return {"messages":[{"internalDate":str(int(time.time() * 1000) + 10000),
+                "payload":{"headers":[{"name":"From", "value":"jane@example.com"}]}}]}
+
+    monkeypatch.setattr(Gmail, "token", token)
+    monkeypatch.setattr(Gmail, "send_message", staticmethod(send))
+    monkeypatch.setattr(Gmail, "thread", thread)
+    request = {"account":"me@example.com", "recipient":"Jane@example.com", "text":"Initial request."}
+    result(client.post(path + "/gmail/send", json={**request, "auto_follow_up":{"text":" ", "days":5}}), 400)
+    result(client.post(path + "/gmail/send", json={**request, "auto_follow_up":{"text":"Reminder", "days":0}}), 422)
+    assert sent == []
+    before = datetime.now(timezone.utc)
+    item = result(client.post(path + "/gmail/send", json={**request,
+                  "auto_follow_up":{"text":"Just following up.", "days":5}}))
+    assert sent == ["Initial request."] and item["state"] == "waiting"
+    assert item["schedule_id"] and item["scheduled_message"] == "Just following up."
+    assert item["mail_peer"] == "jane@example.com" and item["scheduled_send_at"] == item["due_at"]
+    assert before + timedelta(days=5) <= datetime.fromisoformat(item["due_at"]) <= datetime.now(timezone.utc) + timedelta(days=5)
+    assert result(client.post("/api/gmail/check")) == {"replies":1}
+    item = result(client.get(path))
+    assert item["state"] == "replied" and item["schedule_id"] is None and sent == ["Initial request."]
+
+
+def test_unconfirmed_initial_send_does_not_schedule_automatic_follow_up(desk, monkeypatch):
+    client, store = desk
+    item = create_draft(client, saved_job(client), "gmail")
+    path = f"/api/outreach/{item['id']}"
+    result(client.patch(path + "/contact-handoff", json={"email":"jane@example.com"}))
+    store.set_setting("gmail_account", "me@example.com")
+    store.set_setting("gmail_send_enabled", "1")
+    attempts = []
+
+    async def token(self, send=False):
+        return "me@example.com", "fake-token"
+
+    async def timeout(*args):
+        attempts.append(True)
+        raise httpx.ReadTimeout("Gmail did not confirm")
+
+    monkeypatch.setattr(Gmail, "token", token)
+    monkeypatch.setattr(Gmail, "send_message", staticmethod(timeout))
+    request = {"account":"me@example.com", "recipient":"jane@example.com", "text":"Initial request.",
+               "auto_follow_up":{"text":"Saved reminder.", "days":5}}
+    result(client.post(path + "/gmail/send", json=request), 502)
+    item = result(client.get(path))
+    assert item["gmail_send_pending"] and item["schedule_id"] is None
+    assert item["follow_up_draft"] == "Saved reminder."
+    result(client.post(path + "/gmail/send", json=request), 409)
+    assert attempts == [True]
+    store.write("UPDATE outreach SET gmail_send_pending='2000-01-01T00:00:00+00:00' WHERE id=?", (item["id"],))
+    recovered = result(client.post(path + "/events", json={"action":"sent"}))
+    assert recovered["state"] == "waiting" and not recovered["gmail_send_pending"]
+    assert recovered["schedule_id"] is None and recovered["follow_up_draft"] == "Saved reminder."
+
+
 def test_gmail_unknown_delivery_cannot_be_retried(desk, monkeypatch):
     client, store = desk
     item = create_draft(client, saved_job(client), "gmail")
@@ -219,6 +293,9 @@ def test_scheduled_gmail_follow_up_checks_thread_and_sends_at_most_once(tmp_path
                 assert updated["events"][0]["message"] == approved_message
             else:
                 assert updated["gmail_send_pending"] and updated["scheduled_issue"]
+                store.write("UPDATE outreach SET gmail_send_pending='2000-01-01T00:00:00+00:00' WHERE id=?", (item["id"],))
+                recovered = result(client.post(path + "/events", json={"action":"followed_up", "expected_due_at":updated["due_at"]}))
+                assert not recovered["gmail_send_pending"] and recovered["schedule_id"] is None
 
 
 def test_gmail_sending_scope_is_opt_in(desk, monkeypatch):

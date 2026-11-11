@@ -105,10 +105,16 @@ class MailAuthorization(BaseModel):
     send: bool = False
 
 
+class AutomaticFollowUp(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    days: int = Field(ge=1, le=30)
+
+
 class GmailSend(DraftText):
     account: str = Field(max_length=254)
     recipient: str = Field(max_length=254)
     expected_due_at: str | None = Field(default=None, max_length=40)
+    auto_follow_up: AutomaticFollowUp | None = None
 
 
 class GmailSchedule(DraftText):
@@ -630,8 +636,6 @@ def create_app(db_path=None, seed=True):
             if action == "sent" and previous == "waiting":
                 return store.outreach(item_id)
             changes, message = {}, ""
-            if current["gmail_send_pending"]:
-                changes["gmail_send_pending"] = ""
             if action == "sent" and previous == "draft":
                 message = current["draft"] if data.message is None else data.message.strip()
                 if not message:
@@ -661,6 +665,8 @@ def create_app(db_path=None, seed=True):
                 changes = dict(state="closed", due_at=None)
             else:
                 fail("That action does not apply to this conversation.", 409)
+            if current["gmail_send_pending"]:
+                changes["gmail_send_pending"] = ""
             assignments = ",".join(f"{key}=?" for key in changes)
             conn.execute(f"UPDATE outreach SET {assignments} WHERE id=?", (*changes.values(), item_id))
             if changes.get("state", previous) != "waiting" or action in {"followed_up", "snoozed"}:
@@ -732,6 +738,12 @@ def create_app(db_path=None, seed=True):
     async def deliver_gmail(item_id: int, data: GmailSend, schedule=None):
         text = data.text.strip() or fail("Enter a message.")
         follow_up = schedule is not None or data.expected_due_at is not None
+        automatic = data.auto_follow_up
+        automatic_text = automatic.text.strip() if automatic else ""
+        if automatic and (follow_up or not automatic_text):
+            fail("Enter an automatic follow-up only when sending the initial request.")
+        if automatic and (not getattr(app.state, "follow_ups", None) or app.state.follow_ups.done()):
+            fail("Scheduled follow-ups are unavailable. Restart Job Scout before scheduling.", 409)
         async with gmail.lock:
             item = store.outreach(item_id) or fail("Conversation not found.", 404)
             if item["channel"] != "gmail" or item["state"] != ("waiting" if follow_up else "draft"):
@@ -785,7 +797,11 @@ def create_app(db_path=None, seed=True):
                 if schedule is not None and (store.setting("gmail_account") != account
                                              or store.setting("gmail_send_enabled") != "1"):
                     fail("Reconnect Gmail and schedule the follow-up again.", 409)
+                if automatic and (store.setting("gmail_account") != account or store.setting("gmail_send_enabled") != "1"):
+                    fail("Reconnect Gmail before scheduling a follow-up.", 409)
                 conn.execute(f"UPDATE outreach SET gmail_send_pending=?,{draft_field}=? WHERE id=?", (stamp, text, item_id))
+                if automatic:
+                    conn.execute("UPDATE outreach SET follow_up_draft=? WHERE id=?", (automatic_text, item_id))
 
             try:
                 delivery = await gmail.send_message(token, message, thread_id)
@@ -813,10 +829,15 @@ def create_app(db_path=None, seed=True):
                         WHERE id=?""", (now(), after(5), item_id))
                     conn.execute("DELETE FROM gmail_follow_up_schedule WHERE outreach_id=?", (item_id,))
                 else:
+                    due = after(automatic.days if automatic else 5)
                     conn.execute("""UPDATE outreach SET state='waiting',sent_at=?,due_at=?,thread_id=?,mail_account=?,
                         mail_anchor=?,mail_peer=?,gmail_send_pending='',gmail_sent=1 WHERE id=?""",
-                        (now(), after(5), delivered_thread, account, int(started.timestamp() * 1000) - 1,
+                        (now(), due, delivered_thread, account, int(started.timestamp() * 1000) - 1,
                          recipient.lower(), item_id))
+                    if automatic:
+                        conn.execute("""INSERT INTO gmail_follow_up_schedule(id,outreach_id,send_at,message,account,recipient,thread_id)
+                            VALUES(?,?,?,?,?,?,?)""", (uuid4().hex, item_id, due, automatic_text, account,
+                                                      recipient.lower(), delivered_thread))
                 conn.execute("INSERT INTO events(outreach_id,kind,at,note,message) VALUES(?,?,?,?,?)",
                              (item_id, "followed_up" if follow_up else "sent", now(),
                               "Scheduled follow-up sent via Gmail." if schedule else "Sent via Gmail.", text))

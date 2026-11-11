@@ -411,6 +411,11 @@ function showConversation() {
         <div><button class="button small">Save contact handoff</button></div></form></details>`:""}
     ${i.state==="draft"?`<form class="form" data-form="message" data-id="${i.id}"><label>Editable message<textarea id="draft-text" name="text" maxlength="4000" required>${E(i.draft)}</textarea></label>
     ${sendRequest?`<p class="hint">From ${E(mail.account)} to ${E(i.email)}<br>Subject: ${E(`Referral request for ${i.job_title}`)}</p>`:""}
+    ${sendRequest&&mail.scheduling?`<details class="section"><summary>Optional automatic follow-up</summary>
+      <label class="checklabel"><input type="checkbox" id="auto-follow-up"> Schedule this follow-up when I send</label>
+      <label>Follow-up message<textarea id="auto-follow-up-text" maxlength="4000">${E(i.follow_up_draft||followUpText(i))}</textarea></label>
+      <label>Send after<select id="auto-follow-up-days">${select({"3":"3 calendar days","5":"5 calendar days","7":"7 calendar days","14":"14 calendar days"},"5")}</select></label>
+      <p class="hint">Job Scout checks the thread for a reply first. If the app is closed, it checks and sends when reopened.</p></details>`:""}
     <div class="actions">${sendRequest?B("Send via Gmail","gmail-send",i.id,"primary"):""}${B("Copy message","copy-message","",sendRequest?"":"primary")}<button class="button">Save edits</button>${S.info.rewrite_configured?B("AI rewrite","rewrite"):""}</div></form>`:
     `<details><summary>Original request</summary><div class="description">${E(original)}</div></details>`}
     ${waiting?`<section class="section"><p class="eyebrow">FOLLOW-UP</p>
@@ -479,6 +484,9 @@ async function sendGmail(id,followUp=false) {
   const title=$("#dialog-title"), item=S.item;
   const data={text:$(followUp?"#follow-up-text":"#draft-text").value,account:S.info.mail.account,
     recipient:followUp?item.mail_peer:item.email,expected_due_at:followUp?item.due_at:null};
+  if(!followUp&&$("#auto-follow-up")?.checked) {
+    data.auto_follow_up={text:$("#auto-follow-up-text").value,days:Number($("#auto-follow-up-days").value)};
+  }
   let updated;
   try { updated=await api(`/outreach/${id}/gmail/send`,"POST",data); }
   catch(error) {
@@ -490,7 +498,7 @@ async function sendGmail(id,followUp=false) {
   await refreshState();
   if(S.page==="outreach") await render();
   else await refreshNextActions();
-  notice(updated.state==="replied"?"Gmail already has a reply from this contact.":"Sent via Gmail. Job Scout is tracking the thread.");
+  notice(updated.state==="replied"?"Gmail already has a reply from this contact.":updated.schedule_id?"Sent via Gmail; follow-up scheduled.":"Sent via Gmail. Job Scout is tracking the thread.");
 }
 async function changeGmailSchedule(id,cancel=false) {
   const title=$("#dialog-title"), item=S.item;
