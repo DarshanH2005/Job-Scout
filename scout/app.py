@@ -22,7 +22,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import credentials
 from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, graduation_warning, public_url, work_authorization_evidence, workday_base, workday_detail, workday_path
-from .gmail import Gmail, headers, incoming_reply
+from .gmail import Gmail, headers, incoming_reply, thread_review_reason
 from .research import ResearchCache, find_people, rewrite
 from .store import OUTREACH_SELECT, Store, now
 
@@ -769,9 +769,14 @@ def create_app(db_path=None, seed=True):
                 subject = f"Referral request for {item['job_title']}"
                 if follow_up:
                     messages = (await gmail.thread(token, thread_id)).get("messages", [])
+                    if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
+                        fail("Gmail did not return a complete thread. Review it before following up.", 409)
                     if any(incoming_reply(message, item["mail_anchor"], recipient) for message in messages):
                         gmail.record_reply(item)
                         return store.outreach(item_id)
+                    reason = thread_review_reason(messages, item["mail_anchor"], account, recipient)
+                    if reason:
+                        fail(reason, 409)
                     sent = [message for message in messages if "SENT" in message.get("labelIds", [])]
                     previous = headers(max(sent, key=lambda message: int(message.get("internalDate", 0)))) if sent else {}
                     reply_to, subject = previous.get("message-id"), previous.get("subject")

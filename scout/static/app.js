@@ -173,7 +173,7 @@ async function watchlist() {
 
 function inboxRow(item) {
   return `<div class="inbox-row"><div><strong>${E(item.person)} · ${E(item.company)}</strong>
-    <span class="micro">${E(item.job_title)} · ${channels[item.channel]}${item.scheduled_issue||item.gmail_send_pending?" · Check Gmail delivery":item.scheduled_send_at?` · Sends ${date(item.scheduled_send_at,true)}`:item.due_at?` · Check ${date(item.due_at)}`:""}</span></div>
+    <span class="micro">${E(item.job_title)} · ${channels[item.channel]}${item.gmail_send_pending?" · Check Gmail delivery":item.scheduled_issue?" · Review Gmail thread":item.scheduled_send_at?` · Sends ${date(item.scheduled_send_at,true)}`:item.due_at?` · Check ${date(item.due_at)}`:""}</span></div>
     <div class="actions">${tag(stages[item.state],item.state==="submitted"?"good":"")}${B("Open","conversation",item.id,"small")}</div></div>`;
 }
 async function inbox() {
@@ -422,7 +422,7 @@ function showConversation() {
     <form class="form" data-form="follow-up" data-id="${i.id}">
       <label>${i.schedule_id?"Scheduled message":"Follow-up draft"}<textarea id="follow-up-text" name="text" maxlength="4000" required ${i.schedule_id?"readonly":""}>${E(i.scheduled_message || i.follow_up_draft || followUpText(i))}</textarea></label>
       ${i.schedule_id?`<p class="hint">${i.scheduled_issue||i.gmail_send_pending?"Scheduled send needs review":`Scheduled for ${date(i.scheduled_send_at,true)}`} · To ${E(i.mail_peer)}</p>
-      ${i.scheduled_issue?`<p class="evidence">${E(i.scheduled_issue)}</p>`:""}`:
+      ${i.scheduled_issue?`<p class="evidence">${E(i.scheduled_issue)}</p>${i.gmail_send_pending?"":'<p class="hint">Open the Gmail thread to review it. You can cancel this schedule and follow up manually.</p>'}`:""}`:
       `<p class="hint">${sendFollowUp?`Send to ${E(i.mail_peer)} in the original Gmail thread.`:"Send it in the original conversation, then record the send here."}</p>`}
       <div class="actions">${sendFollowUp?B("Send Gmail follow-up","gmail-follow-up",i.id,"primary"):""}${B("Copy follow-up","copy-follow-up","",sendFollowUp?"":"primary")}
       ${i.schedule_id?(!i.gmail_send_pending?B("Cancel scheduled send","gmail-cancel-schedule",i.id,"small"):""):'<button class="button">Save draft</button>'}

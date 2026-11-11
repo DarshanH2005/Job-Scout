@@ -33,7 +33,14 @@ def headers(message):
 
 
 def incoming_reply(message, anchor, peer):
-    if "SENT" in message.get("labelIds", []) or int(message.get("internalDate", 0)) <= anchor:
+    labels = message.get("labelIds", [])
+    if not isinstance(labels, list) or not isinstance(anchor, int):
+        return False
+    try:
+        received = int(message.get("internalDate", 0))
+    except (TypeError, ValueError):
+        return False
+    if "SENT" in labels or received <= anchor:
         return False
     data = headers(message)
     address = parseaddr(data.get("from", ""))[1].lower()
@@ -43,6 +50,39 @@ def incoming_reply(message, anchor, peer):
             and data.get("auto-submitted", "no").lower() == "no"
             and data.get("precedence", "").lower() not in {"bulk", "list", "junk"}
             and "delivery-status" not in data.get("content-type", "").lower())
+
+
+def thread_review_reason(messages, anchor, account, peer):
+    """Stop a follow-up when the thread contains a reply that needs human review."""
+    if not isinstance(messages, list) or not messages:
+        return "Gmail did not return a complete thread. Review it before following up."
+    if not isinstance(anchor, int):
+        return "Gmail did not return the original send date. Review the thread before following up."
+    for message in messages:
+        if not isinstance(message, dict):
+            return "Gmail did not return a complete thread. Review it before following up."
+        labels = message.get("labelIds", [])
+        if not isinstance(labels, list):
+            return "Gmail did not return complete message labels. Review the thread before following up."
+        if "SENT" in labels:
+            continue
+        try:
+            received = int(message["internalDate"])
+        except (KeyError, TypeError, ValueError):
+            return "Gmail did not return a message date. Review the thread before following up."
+        if received <= anchor:
+            continue
+        address = parseaddr(headers(message).get("from", ""))[1].lower()
+        if address == account.lower():
+            continue
+        if not address:
+            return "A message has no recognizable sender. Review the thread before following up."
+        if address == peer:
+            if not incoming_reply(message, anchor, peer):
+                return "The contact sent an automatic or nonstandard reply. Review the thread before following up."
+        else:
+            return "Another sender replied in the thread. Review it before following up."
+    return ""
 
 
 class Gmail:
@@ -240,11 +280,24 @@ class Gmail:
                     if exc.response.status_code != 404:
                         raise
                     issues += 1
+                    self.store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE outreach_id=? AND issue=''",
+                                     ("The Gmail thread could not be found. Review it before following up.", item["id"]))
                     continue
-                reply = next((message for message in thread.get("messages", [])
+                messages = thread.get("messages")
+                if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
+                    issues += 1
+                    self.store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE outreach_id=? AND issue=''",
+                                     ("Gmail did not return a complete thread. Review it before following up.", item["id"]))
+                    continue
+                reply = next((message for message in messages or []
                               if incoming_reply(message, item["mail_anchor"], item["mail_peer"])), None)
                 if reply:
                     replies += self.record_reply(item)
+                else:
+                    reason = thread_review_reason(messages, item["mail_anchor"], account, item["mail_peer"])
+                    if reason:
+                        self.store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE outreach_id=? AND issue=''",
+                                         (reason, item["id"]))
             if self.store.setting("linkedin_hints") == "1":
                 await self._linkedin_hints(account, token)
             self.store.set_setting("gmail_checked_at", now())

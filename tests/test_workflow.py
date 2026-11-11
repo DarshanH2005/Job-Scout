@@ -99,6 +99,11 @@ def test_gmail_direct_send_and_follow_up_track_the_original_thread(desk, monkeyp
     assert sent[0][1].get_content().strip() == request["text"]
     result(client.post(path + "/gmail/send", json=request), 409)
     follow_up = {**request, "recipient": "jane@example.com", "expected_due_at": item["due_at"], "text": "Following up."}
+    thread_messages.append({"internalDate":str(item["mail_anchor"] + 1), "payload":{"headers":[
+        {"name":"From", "value":"recruiter@example.com"}]}})
+    assert "Another sender" in result(client.post(path + "/gmail/send", json=follow_up), 409)["detail"]
+    assert len(sent) == 1
+    thread_messages.pop()
     item = result(client.post(path + "/gmail/send", json=follow_up))
     assert sent[1][0] == "example-thread" and sent[1][1]["In-Reply-To"] == "<first@example.com>"
     assert item["events"][0]["kind"] == "followed_up"
@@ -120,6 +125,7 @@ def test_initial_gmail_send_can_schedule_a_reply_aware_follow_up(desk, monkeypat
     store.set_setting("gmail_account", "me@example.com")
     store.set_setting("gmail_send_enabled", "1")
     sent = []
+    automatic_reply = [True]
 
     async def token(self, send=False):
         return "me@example.com", "fake-token"
@@ -130,8 +136,11 @@ def test_initial_gmail_send_can_schedule_a_reply_aware_follow_up(desk, monkeypat
 
     async def thread(self, token, thread_id):
         assert thread_id == "thread-one"
+        headers = [{"name":"From", "value":"jane@example.com"}]
+        if automatic_reply[0]:
+            headers.append({"name":"Auto-Submitted", "value":"auto-replied"})
         return {"messages":[{"internalDate":str(int(time.time() * 1000) + 10000),
-                "payload":{"headers":[{"name":"From", "value":"jane@example.com"}]}}]}
+                "payload":{"headers":headers}}]}
 
     monkeypatch.setattr(Gmail, "token", token)
     monkeypatch.setattr(Gmail, "send_message", staticmethod(send))
@@ -147,6 +156,10 @@ def test_initial_gmail_send_can_schedule_a_reply_aware_follow_up(desk, monkeypat
     assert item["schedule_id"] and item["scheduled_message"] == "Just following up."
     assert item["mail_peer"] == "jane@example.com" and item["scheduled_send_at"] == item["due_at"]
     assert before + timedelta(days=5) <= datetime.fromisoformat(item["due_at"]) <= datetime.now(timezone.utc) + timedelta(days=5)
+    assert result(client.post("/api/gmail/check")) == {"replies":0}
+    item = result(client.get(path))
+    assert item["state"] == "waiting" and item["schedule_id"] and "automatic" in item["scheduled_issue"]
+    automatic_reply[0] = False
     assert result(client.post("/api/gmail/check")) == {"replies":1}
     item = result(client.get(path))
     assert item["state"] == "replied" and item["schedule_id"] is None and sent == ["Initial request."]
@@ -209,7 +222,7 @@ def test_gmail_unknown_delivery_cannot_be_retried(desk, monkeypatch):
     assert len(attempts) == 1
 
 
-@pytest.mark.parametrize("outcome", ["sent", "replied", "unconfirmed", "unexpected"])
+@pytest.mark.parametrize("outcome", ["sent", "replied", "unconfirmed", "unexpected", "automatic_reply", "other_sender", "missing_date"])
 def test_scheduled_gmail_follow_up_checks_thread_and_sends_at_most_once(tmp_path, monkeypatch, outcome):
     from datetime import datetime, timedelta, timezone
 
@@ -235,6 +248,13 @@ def test_scheduled_gmail_follow_up_checks_thread_and_sends_at_most_once(tmp_path
         ]}}]
         if outcome == "replied":
             messages.append({"internalDate": "2", "payload": {"headers": [{"name": "From", "value": recipient}]}})
+        elif outcome == "automatic_reply":
+            messages.append({"internalDate":"2", "payload":{"headers":[{"name":"From", "value":recipient},
+                             {"name":"Auto-Submitted", "value":"auto-replied"}]}})
+        elif outcome == "other_sender":
+            messages.append({"internalDate":"2", "payload":{"headers":[{"name":"From", "value":"recruiter@example.com"}]}})
+        elif outcome == "missing_date":
+            messages.append({"payload":{"headers":[{"name":"From", "value":recipient}]}})
         return {"messages": messages}
 
     async def send(token, message, identifier):
@@ -276,10 +296,16 @@ def test_scheduled_gmail_follow_up_checks_thread_and_sends_at_most_once(tmp_path
         else:
             pytest.fail("The scheduled send did not finish.")
 
-        if outcome == "unexpected":
+        if outcome in {"unexpected", "automatic_reply", "other_sender", "missing_date"}:
             assert updated["state"] == "waiting" and updated["scheduled_issue"]
             assert attempts == []
             assert result(client.get("/api/state"))["mail"]["scheduling"]
+            if outcome == "automatic_reply":
+                assert "automatic" in updated["scheduled_issue"]
+            elif outcome == "other_sender":
+                assert "Another sender" in updated["scheduled_issue"]
+            elif outcome == "missing_date":
+                assert "message date" in updated["scheduled_issue"]
             time.sleep(.05)
             assert attempts == []
         elif outcome == "replied":
