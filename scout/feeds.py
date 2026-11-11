@@ -383,6 +383,23 @@ async def fetch_board(client, company, limit):
                         raise ValueError("Workday returned a posting without a title.")
                     remote = "Remote" if str(row.get("remoteType", "")).casefold() == "remote" else ""
                     jobs.append(build_job(path, title, "", row.get("locationsText"), remote, "", public_base + path))
+                # Resolve a bounded set of early-career listings whose location is only a count.
+                candidates = [i for i, job in enumerate(jobs) if job["score"] >= EARLY_SCORE
+                              and re.fullmatch(r"\d+\s+locations?", job["location"], re.I)][:20]
+                detail_limit = asyncio.Semaphore(2)
+
+                async def enrich(index):
+                    async with detail_limit:
+                        try:
+                            original = jobs[index]
+                            description, location, workplace = await workday_detail(client, company["board"], original["external_id"])
+                            if not workplace and original["evidence"] == f'{original["location"]} · Remote':
+                                workplace = "Remote"
+                            jobs[index] = build_job(original["external_id"], original["title"], original["department"],
+                                                    location or original["location"], workplace, description, original["url"])
+                        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+                            pass  # Keep the honest, unclear summary; opening the role can retry the detail.
+                await asyncio.gather(*(enrich(index) for index in candidates))
                 return jobs, None
             url = PROVIDERS[provider].format(board=quote(company["board"], safe=""))
             if provider == "smartrecruiters":
@@ -423,6 +440,24 @@ async def fetch_json(client, url, params=None, json_body=None):
             if attempt:
                 raise
             await asyncio.sleep(0.4)
+
+
+async def workday_detail(client, board, external_id):
+    base, public_base = workday_base(board)
+    path = workday_path(external_id)
+    info = (await fetch_json(client, base + path))["jobPostingInfo"]
+    if canonical_url(info["externalUrl"]) != canonical_url(public_base + path):
+        raise ValueError("The employer posting did not match.")
+    description = clean(info.get("jobDescription"))[:30000]
+    if not description:
+        raise ValueError("The employer posting contained no description.")
+    additional = info.get("additionalLocations") or []
+    if not isinstance(additional, list) or not all(isinstance(value, str) for value in additional):
+        raise ValueError("The employer posting locations could not be read.")
+    locations = [clean(value) for value in [info.get("location"), *additional] if value]
+    location = ", ".join(dict.fromkeys(locations))
+    workplace = "Remote" if str(info.get("remoteType", "")).casefold() == "remote" else ""
+    return description, location, workplace
 
 
 async def workday_postings(client, base):

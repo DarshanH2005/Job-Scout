@@ -795,6 +795,61 @@ def test_workday_details_are_checked_and_loaded_on_demand(desk, monkeypatch):
     assert result(client.post(f"/api/jobs/{job['id']}/verify"))["status"] == "not_listed"
 
 
+@pytest.mark.parametrize("case", ["success", "unavailable", "mismatch"])
+def test_workday_scan_resolves_early_career_multilocation_posts(case):
+    path = "/job/India-Bangalore/Summer-Intern_R1"
+    public = "https://sample.wd5.myworkdayjobs.com/External" + path
+
+    def respond(request):
+        if request.method == "POST":
+            return httpx.Response(200, json={"total":1, "jobPostings":[
+                {"title":"Software Engineer Intern", "externalPath":path, "locationsText":"2 Locations"}]})
+        if case == "unavailable":
+            return httpx.Response(503)
+        return httpx.Response(200, json={"jobPostingInfo":{
+            "externalUrl": public if case == "success" else "https://other.example/different",
+            "location":"Bangalore, India", "additionalLocations":["Hyderabad, India"],
+            "jobDescription":"<p>Graduating in 2028.</p>"}})
+
+    async def read():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await fetch_board(client, {"provider":"workday", "board":"sample.wd5.External"}, asyncio.Semaphore(1))
+    jobs, error = asyncio.run(read())
+    assert not error and len(jobs) == 1
+    if case == "success":
+        assert jobs[0]["region"] == "india" and "Hyderabad" in jobs[0]["location"]
+        assert "Graduating in 2028" in jobs[0]["description"]
+    else:
+        assert jobs[0]["region"] == "unclear" and jobs[0]["location"] == "2 Locations"
+        assert jobs[0]["description"] == ""
+
+
+def test_workday_location_enrichment_is_bounded():
+    import json
+    details = []
+    rows = [{"title":"Software Engineer Intern", "externalPath":f"/job/India/Intern_R{i}",
+             "locationsText":"2 Locations"} for i in range(21)]
+
+    def respond(request):
+        if request.method == "POST":
+            offset = json.loads(request.content)["offset"]
+            return httpx.Response(200, json={"total":21 if not offset else 0,
+                                             "jobPostings":rows[offset:offset + 20]})
+        path = request.url.path.removeprefix("/wday/cxs/sample/External")
+        details.append(path)
+        return httpx.Response(200, json={"jobPostingInfo":{
+            "externalUrl":"https://sample.wd5.myworkdayjobs.com/External" + path,
+            "location":"Bangalore, India", "jobDescription":"<p>Build software.</p>"}})
+
+    async def read():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await fetch_board(client, {"provider":"workday", "board":"sample.wd5.External"}, asyncio.Semaphore(1))
+    jobs, error = asyncio.run(read())
+    assert not error and len(jobs) == 21 and len(details) == 20
+    assert sum(job["region"] == "india" for job in jobs) == 20
+    assert sum(job["region"] == "unclear" for job in jobs) == 1
+
+
 def test_workday_source_migration_preserves_customized_company(tmp_path):
     store = Store(tmp_path / "migration.sqlite3")
     store.initialize(seed=True)

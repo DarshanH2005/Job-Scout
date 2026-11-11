@@ -21,7 +21,7 @@ from pydantic import AwareDatetime, BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import credentials
-from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, public_url, work_authorization_evidence, workday_base, workday_path
+from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, public_url, work_authorization_evidence, workday_base, workday_detail, workday_path
 from .gmail import Gmail, headers, incoming_reply
 from .research import ResearchCache, find_people, rewrite
 from .store import OUTREACH_SELECT, Store, now
@@ -396,24 +396,15 @@ def create_app(db_path=None, seed=True):
             item["details_status"] = "unavailable"
             return item
         try:
-            if item["provider"] == "workday":
-                base, public_base = workday_base(company["board"])
-                path = workday_path(item["external_id"])
-                url = base + path
-            else:
-                url = PROVIDERS["smartrecruiters"].format(board=quote(company["board"], safe=""))
-                url += "/" + quote(item["external_id"], safe="")
             async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
-                detail = await fetch_json(client, url)
-            detail_location = item["location"]
-            if item["provider"] == "workday":
-                info = detail["jobPostingInfo"]
-                if canonical_url(info["externalUrl"]) != canonical_url(public_base + path):
-                    raise ValueError("The employer posting did not match.")
-                description = clean(info.get("jobDescription"))[:30000]
-                detail_location = ", ".join(dict.fromkeys(filter(None, [info.get("location"), *(info.get("additionalLocations") or [])])))
-                workplace = "Remote" if str(info.get("remoteType", "")).casefold() == "remote" else ""
-            else:
+                if item["provider"] == "workday":
+                    description, detail_location, workplace = await workday_detail(client, company["board"], item["external_id"])
+                else:
+                    url = PROVIDERS["smartrecruiters"].format(board=quote(company["board"], safe=""))
+                    url += "/" + quote(item["external_id"], safe="")
+                    detail = await fetch_json(client, url)
+            if item["provider"] == "smartrecruiters":
+                detail_location = item["location"]
                 if (str(detail["id"]) != item["external_id"] or detail.get("active") is False
                         or detail["company"]["identifier"].casefold() != company["board"].casefold()):
                     raise ValueError("The employer posting did not match.")
