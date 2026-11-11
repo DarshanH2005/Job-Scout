@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS gmail_follow_up_schedule (
     id TEXT PRIMARY KEY, outreach_id INTEGER NOT NULL UNIQUE REFERENCES outreach(id),
     send_at TEXT NOT NULL, message TEXT NOT NULL, account TEXT NOT NULL, recipient TEXT NOT NULL,
-    thread_id TEXT NOT NULL, issue TEXT NOT NULL DEFAULT ''
+    thread_id TEXT NOT NULL, issue TEXT NOT NULL DEFAULT '', reviewed_message_ids TEXT NOT NULL DEFAULT '[]',
+    review_pending_ids TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS mail_seen (
     account TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL,
@@ -77,7 +78,8 @@ JOB_FIELDS = ("external_id", "title", "department", "location", "description", "
 OUTREACH_SELECT = """
 SELECT o.*, c.name AS person, c.source, c.profile_url, c.email, j.title AS job_title, j.url AS job_url,
        j.applied_at, co.name AS company, f.id AS schedule_id, f.send_at AS scheduled_send_at,
-       f.message AS scheduled_message, f.issue AS scheduled_issue
+       f.message AS scheduled_message, f.issue AS scheduled_issue, f.reviewed_message_ids AS scheduled_reviewed_message_ids,
+       f.review_pending_ids AS scheduled_review_pending_ids
 FROM outreach o JOIN contacts c ON c.id=o.contact_id JOIN jobs j ON j.id=o.job_id
 JOIN companies co ON co.id=j.company_id
 LEFT JOIN gmail_follow_up_schedule f ON f.outreach_id=o.id
@@ -127,6 +129,10 @@ class Store:
                 conn.execute("ALTER TABLE outreach ADD COLUMN gmail_send_pending TEXT NOT NULL DEFAULT ''")
             if "gmail_sent" not in outreach_columns:
                 conn.execute("ALTER TABLE outreach ADD COLUMN gmail_sent INTEGER NOT NULL DEFAULT 0")
+            if not any(row["name"] == "reviewed_message_ids" for row in conn.execute("PRAGMA table_info(gmail_follow_up_schedule)")):
+                conn.execute("ALTER TABLE gmail_follow_up_schedule ADD COLUMN reviewed_message_ids TEXT NOT NULL DEFAULT '[]'")
+            if not any(row["name"] == "review_pending_ids" for row in conn.execute("PRAGMA table_info(gmail_follow_up_schedule)")):
+                conn.execute("ALTER TABLE gmail_follow_up_schedule ADD COLUMN review_pending_ids TEXT NOT NULL DEFAULT '[]'")
             contact_columns = {row["name"] for row in conn.execute("PRAGMA table_info(contacts)")}
             if "profile_url" not in contact_columns:
                 conn.execute("ALTER TABLE contacts ADD COLUMN profile_url TEXT NOT NULL DEFAULT ''")

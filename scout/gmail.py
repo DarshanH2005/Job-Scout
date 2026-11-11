@@ -26,6 +26,9 @@ REDIRECT = "http://127.0.0.1:8765/oauth/google"
 KEYRING_SERVICE = "Job Scout Gmail"
 HEADERS = ["From", "To", "Cc", "Bcc", "Subject", "Auto-Submitted", "Precedence", "Content-Type", "In-Reply-To",
            "Message-ID", "References"]
+AUTO_REPLY_REVIEW = "The contact sent an automatic or nonstandard reply. Review the thread before following up."
+OTHER_REPLY_REVIEW = "Another sender replied in the thread. Review it before following up."
+REVIEWABLE_ISSUES = {AUTO_REPLY_REVIEW, OTHER_REPLY_REVIEW}
 
 
 def headers(message):
@@ -52,7 +55,17 @@ def incoming_reply(message, anchor, peer):
             and "delivery-status" not in data.get("content-type", "").lower())
 
 
-def thread_review_reason(messages, anchor, account, peer):
+def parse_reviewed_ids(value):
+    try:
+        ids = json.loads(value or "[]")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Saved thread review information is invalid. Cancel the schedule and review Gmail.") from exc
+    if not isinstance(ids, list) or len(ids) > 500 or not all(isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", item) for item in ids):
+        raise ValueError("Saved thread review information is invalid. Cancel the schedule and review Gmail.")
+    return set(ids)
+
+
+def thread_review_reason(messages, anchor, account, peer, reviewed_ids=None):
     """Stop a follow-up when the thread contains a reply that needs human review."""
     if not isinstance(messages, list) or not messages:
         return "Gmail did not return a complete thread. Review it before following up."
@@ -77,12 +90,45 @@ def thread_review_reason(messages, anchor, account, peer):
             continue
         if not address:
             return "A message has no recognizable sender. Review the thread before following up."
+        message_id = message.get("id")
+        if isinstance(message_id, str) and message_id in (reviewed_ids or set()):
+            continue
         if address == peer:
             if not incoming_reply(message, anchor, peer):
-                return "The contact sent an automatic or nonstandard reply. Review the thread before following up."
+                return AUTO_REPLY_REVIEW
         else:
-            return "Another sender replied in the thread. Review it before following up."
+            return OTHER_REPLY_REVIEW
     return ""
+
+
+def reviewable_message_ids(messages, anchor, account, peer):
+    if not isinstance(messages, list) or not messages:
+        raise ValueError("Gmail did not return a complete thread. Review it before following up.")
+    ids = set()
+    for message in messages:
+        reason = thread_review_reason([message], anchor, account, peer)
+        if reason and reason not in REVIEWABLE_ISSUES:
+            raise ValueError(reason)
+        if reason:
+            message_id = message.get("id")
+            if not isinstance(message_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", message_id):
+                raise ValueError("Gmail did not return a message ID. Review the thread before following up.")
+            ids.add(message_id)
+    if len(ids) > 500:
+        raise ValueError("Too many messages to review safely. Cancel the schedule and follow up manually.")
+    return ids
+
+
+def thread_review_snapshot(messages, anchor, account, peer, reviewed_ids=None):
+    reviewed_ids = reviewed_ids or set()
+    reason = thread_review_reason(messages, anchor, account, peer, reviewed_ids)
+    if reason not in REVIEWABLE_ISSUES:
+        return reason, set()
+    try:
+        pending = reviewable_message_ids(messages, anchor, account, peer) - reviewed_ids
+    except ValueError as exc:
+        return str(exc), set()
+    return reason, pending
 
 
 class Gmail:
@@ -270,8 +316,9 @@ class Gmail:
     async def check(self):
         async with self.lock:
             account, token = await self.token()
-            items = self.store.all("""SELECT id,thread_id,mail_anchor,mail_peer FROM outreach
-                WHERE mail_account=? AND thread_id IS NOT NULL AND state='waiting'""", (account,))
+            items = self.store.all("""SELECT o.id,o.thread_id,o.mail_anchor,o.mail_peer,f.reviewed_message_ids FROM outreach o
+                LEFT JOIN gmail_follow_up_schedule f ON f.outreach_id=o.id
+                WHERE o.mail_account=? AND o.thread_id IS NOT NULL AND o.state='waiting'""", (account,))
             replies, issues = 0, 0
             for item in items:
                 try:
@@ -294,10 +341,14 @@ class Gmail:
                 if reply:
                     replies += self.record_reply(item)
                 else:
-                    reason = thread_review_reason(messages, item["mail_anchor"], account, item["mail_peer"])
+                    try:
+                        reviewed = parse_reviewed_ids(item["reviewed_message_ids"])
+                        reason, pending = thread_review_snapshot(messages, item["mail_anchor"], account, item["mail_peer"], reviewed)
+                    except ValueError as exc:
+                        reason, pending = str(exc), set()
                     if reason:
-                        self.store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE outreach_id=? AND issue=''",
-                                         (reason, item["id"]))
+                        self.store.write("UPDATE gmail_follow_up_schedule SET issue=?,review_pending_ids=? WHERE outreach_id=? AND issue=''",
+                                         (reason, json.dumps(sorted(pending)), item["id"]))
             if self.store.setting("linkedin_hints") == "1":
                 await self._linkedin_hints(account, token)
             self.store.set_setting("gmail_checked_at", now())

@@ -22,7 +22,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import credentials
 from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, graduation_warning, public_url, work_authorization_evidence, workday_base, workday_detail, workday_path
-from .gmail import Gmail, headers, incoming_reply, thread_review_reason
+from .gmail import Gmail, REVIEWABLE_ISSUES, headers, incoming_reply, parse_reviewed_ids, reviewable_message_ids, thread_review_snapshot
 from .research import ResearchCache, find_people, rewrite
 from .store import OUTREACH_SELECT, Store, now
 
@@ -122,6 +122,11 @@ class GmailSchedule(DraftText):
     thread_id: str = Field(pattern=r"^[0-9a-zA-Z_\-]{1,100}$")
     account: str = Field(max_length=254)
     recipient: str = Field(max_length=254)
+
+
+class ResumeSchedule(BaseModel):
+    expected_issue: str = Field(max_length=500)
+    expected_pending_ids: str = Field(max_length=52000)
 
 
 class IntegrationInput(BaseModel):
@@ -244,7 +249,7 @@ def create_app(db_path=None, seed=True):
                         logging.exception("Scheduled Gmail follow-up failed")
                     issue = exc.detail if isinstance(exc, HTTPException) else "An unexpected error occurred. Check Gmail Sent before rescheduling."
                     try:
-                        store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE id=?", (issue, schedule["id"]))
+                        store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE id=? AND issue=''", (issue, schedule["id"]))
                     except Exception:
                         logging.exception("Could not mark scheduled Gmail follow-up for review")
 
@@ -731,6 +736,60 @@ def create_app(db_path=None, seed=True):
                 fail("This schedule changed. Reopen the conversation to review it.", 409)
         return store.outreach(item_id)
 
+    @app.post("/api/outreach/{item_id}/gmail/follow-up-schedule/{schedule_id}/resume")
+    async def resume_follow_up(item_id: int, schedule_id: str, data: ResumeSchedule):
+        async with gmail.lock:
+            item = store.outreach(item_id) or fail("Conversation not found.", 404)
+            if (item["channel"] != "gmail" or item["state"] != "waiting" or item["gmail_send_pending"]
+                    or item["schedule_id"] != schedule_id or item["scheduled_issue"] not in REVIEWABLE_ISSUES
+                    or not item["thread_id"] or not item["mail_peer"] or not item["mail_account"]):
+                fail("This scheduled follow-up cannot be resumed. Reopen the conversation.", 409)
+            if item["scheduled_issue"] != data.expected_issue or item["scheduled_review_pending_ids"] != data.expected_pending_ids:
+                fail("The thread changed. Reopen the conversation and review it again.", 409)
+            try:
+                account, token = await gmail.token(send=True)
+                if account != item["mail_account"] or store.setting("gmail_send_enabled") != "1":
+                    fail("Reconnect the original Gmail account before resuming.", 409)
+                messages = (await gmail.thread(token, item["thread_id"])).get("messages")
+                if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
+                    fail("Gmail did not return a complete thread. Review it before following up.", 409)
+                if any(incoming_reply(message, item["mail_anchor"], item["mail_peer"]) for message in messages):
+                    gmail.record_reply(item)
+                    return store.outreach(item_id)
+                current_ids = reviewable_message_ids(messages, item["mail_anchor"], account, item["mail_peer"])
+                reviewed = parse_reviewed_ids(item["scheduled_reviewed_message_ids"])
+                pending = parse_reviewed_ids(item["scheduled_review_pending_ids"])
+                new_messages = current_ids - reviewed - pending
+                approved = reviewed | (pending & current_ids)
+                if len(approved) > 500:
+                    fail("Too many messages to review safely. Cancel the schedule and follow up manually.", 409)
+            except ValueError as exc:
+                fail(str(exc), 409)
+            except (KeyError, TypeError, AttributeError):
+                fail("Gmail did not return complete thread metadata. Review it before following up.", 409)
+            except (httpx.HTTPError, OSError, ImportError, RuntimeError) as exc:
+                fail(mail_failure(exc), 502)
+            with store.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(OUTREACH_SELECT + " WHERE o.id=?", (item_id,)).fetchone()
+                fields = ("state", "gmail_send_pending", "thread_id", "mail_anchor", "mail_peer", "mail_account", "due_at", "schedule_id",
+                          "scheduled_issue", "scheduled_send_at", "scheduled_message", "scheduled_reviewed_message_ids", "scheduled_review_pending_ids")
+                if not current or any(current[key] != item[key] for key in fields):
+                    fail("This conversation changed. Reopen it before resuming.", 409)
+                if store.setting("gmail_account") != account or store.setting("gmail_send_enabled") != "1":
+                    fail("Reconnect the original Gmail account before resuming.", 409)
+                if new_messages:
+                    conn.execute("UPDATE gmail_follow_up_schedule SET review_pending_ids=? WHERE id=?",
+                                 (json.dumps(sorted(current_ids - reviewed)), schedule_id))
+                else:
+                    conn.execute("UPDATE gmail_follow_up_schedule SET issue='',reviewed_message_ids=?,review_pending_ids='[]' WHERE id=?",
+                                 (json.dumps(sorted(approved)), schedule_id))
+                    conn.execute("INSERT INTO events(outreach_id,kind,at,note) VALUES(?,?,?,?)",
+                                 (item_id, "schedule_resumed", now(), "Marked the Gmail thread reviewed in Job Scout."))
+            if new_messages:
+                fail("A new message arrived since the pause. Review Gmail again before resuming.", 409)
+            return store.outreach(item_id)
+
     @app.post("/api/outreach/{item_id}/gmail/send")
     async def send_gmail(item_id: int, data: GmailSend):
         return await deliver_gmail(item_id, data)
@@ -774,8 +833,12 @@ def create_app(db_path=None, seed=True):
                     if any(incoming_reply(message, item["mail_anchor"], recipient) for message in messages):
                         gmail.record_reply(item)
                         return store.outreach(item_id)
-                    reason = thread_review_reason(messages, item["mail_anchor"], account, recipient)
+                    reviewed = parse_reviewed_ids(schedule.get("reviewed_message_ids")) if schedule else set()
+                    reason, pending = thread_review_snapshot(messages, item["mail_anchor"], account, recipient, reviewed)
                     if reason:
+                        if schedule:
+                            store.write("UPDATE gmail_follow_up_schedule SET issue=?,review_pending_ids=? WHERE id=? AND issue=''",
+                                        (reason, json.dumps(sorted(pending)), schedule["id"]))
                         fail(reason, 409)
                     sent = [message for message in messages if "SENT" in message.get("labelIds", [])]
                     previous = headers(max(sent, key=lambda message: int(message.get("internalDate", 0)))) if sent else {}

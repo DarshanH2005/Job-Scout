@@ -99,7 +99,7 @@ def test_gmail_direct_send_and_follow_up_track_the_original_thread(desk, monkeyp
     assert sent[0][1].get_content().strip() == request["text"]
     result(client.post(path + "/gmail/send", json=request), 409)
     follow_up = {**request, "recipient": "jane@example.com", "expected_due_at": item["due_at"], "text": "Following up."}
-    thread_messages.append({"internalDate":str(item["mail_anchor"] + 1), "payload":{"headers":[
+    thread_messages.append({"id":"other-one", "internalDate":str(item["mail_anchor"] + 1), "payload":{"headers":[
         {"name":"From", "value":"recruiter@example.com"}]}})
     assert "Another sender" in result(client.post(path + "/gmail/send", json=follow_up), 409)["detail"]
     assert len(sent) == 1
@@ -139,7 +139,7 @@ def test_initial_gmail_send_can_schedule_a_reply_aware_follow_up(desk, monkeypat
         headers = [{"name":"From", "value":"jane@example.com"}]
         if automatic_reply[0]:
             headers.append({"name":"Auto-Submitted", "value":"auto-replied"})
-        return {"messages":[{"internalDate":str(int(time.time() * 1000) + 10000),
+        return {"messages":[{"id":"reply-one", "internalDate":str(int(time.time() * 1000) + 10000),
                 "payload":{"headers":headers}}]}
 
     monkeypatch.setattr(Gmail, "token", token)
@@ -249,10 +249,10 @@ def test_scheduled_gmail_follow_up_checks_thread_and_sends_at_most_once(tmp_path
         if outcome == "replied":
             messages.append({"internalDate": "2", "payload": {"headers": [{"name": "From", "value": recipient}]}})
         elif outcome == "automatic_reply":
-            messages.append({"internalDate":"2", "payload":{"headers":[{"name":"From", "value":recipient},
+            messages.append({"id":"auto-one", "internalDate":"2", "payload":{"headers":[{"name":"From", "value":recipient},
                              {"name":"Auto-Submitted", "value":"auto-replied"}]}})
         elif outcome == "other_sender":
-            messages.append({"internalDate":"2", "payload":{"headers":[{"name":"From", "value":"recruiter@example.com"}]}})
+            messages.append({"id":"other-one", "internalDate":"2", "payload":{"headers":[{"name":"From", "value":"recruiter@example.com"}]}})
         elif outcome == "missing_date":
             messages.append({"payload":{"headers":[{"name":"From", "value":recipient}]}})
         return {"messages": messages}
@@ -332,6 +332,92 @@ def test_gmail_sending_scope_is_opt_in(desk, monkeypatch):
     for send, scopes in [(False, [SCOPE]), (True, [SCOPE, SEND_SCOPE])]:
         url = result(client.post("/api/gmail/authorize", json={"send": send}))["url"]
         assert parse_qs(urlsplit(url).query)["scope"][0].split() == scopes
+
+
+@pytest.mark.parametrize("outcome", ["send", "reply", "new_during_review", "missing_id", "stale_view"])
+def test_resuming_schedule_acknowledges_only_reviewed_messages(tmp_path, monkeypatch, outcome):
+    from datetime import datetime, timedelta, timezone
+    import json
+
+    db = tmp_path / "resume.sqlite3"
+    store = Store(db)
+    attempts = []
+    monkeypatch.setattr(app_module, "GMAIL_SCHEDULE_INTERVAL", 0.01)
+    messages = [
+        {"id":"sent-one", "labelIds":["SENT"], "internalDate":"1", "payload":{"headers":[
+            {"name":"Subject", "value":"Referral request"}, {"name":"Message-ID", "value":"<first@example.com>"}]}},
+        {"id":"auto-one", "internalDate":"2", "payload":{"headers":[
+            {"name":"From", "value":"jane@example.com"}, {"name":"Auto-Submitted", "value":"auto-replied"}]}},
+    ]
+
+    async def token(self, send=False):
+        return "me@example.com", "fake-token"
+
+    async def thread(self, token, identifier):
+        assert identifier == "thread-one"
+        return {"messages":messages}
+
+    async def send(token, message, identifier):
+        attempts.append((identifier, message.get_content().strip()))
+        return {"id":"follow-up", "threadId":identifier}
+
+    monkeypatch.setattr(Gmail, "token", token)
+    monkeypatch.setattr(Gmail, "thread", thread)
+    monkeypatch.setattr(Gmail, "send_message", staticmethod(send))
+    with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765") as client:
+        store.set_setting("gmail_account", "me@example.com")
+        store.set_setting("gmail_send_enabled", "1")
+        item = action(client, create_draft(client, saved_job(client), "gmail"), "sent")
+        path = f"/api/outreach/{item['id']}"
+        store.write("UPDATE outreach SET thread_id='thread-one',mail_account='me@example.com',mail_peer='jane@example.com',mail_anchor=1 WHERE id=?", (item["id"],))
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        scheduled = result(client.post(path + "/gmail/follow-up-schedule", json={"text":"Approved follow-up.",
+            "account":"me@example.com", "recipient":"jane@example.com", "thread_id":"thread-one", "send_at":future}))
+        assert result(client.post("/api/gmail/check")) == {"replies":0}
+        paused = result(client.get(path))
+        assert json.loads(paused["scheduled_review_pending_ids"]) == ["auto-one"]
+        resume = path + "/gmail/follow-up-schedule/" + scheduled["schedule_id"] + "/resume"
+        request = {"expected_issue":paused["scheduled_issue"], "expected_pending_ids":paused["scheduled_review_pending_ids"]}
+        if outcome == "reply":
+            messages.append({"id":"human-one", "internalDate":"3", "payload":{"headers":[{"name":"From", "value":"jane@example.com"}]}})
+            result_item = result(client.post(resume, json=request))
+            assert result_item["state"] == "replied" and result_item["schedule_id"] is None and attempts == []
+            return
+        if outcome == "missing_id":
+            messages[1].pop("id")
+            assert "message ID" in result(client.post(resume, json=request), 409)["detail"]
+            assert result(client.get(path))["scheduled_issue"] and attempts == []
+            return
+        if outcome == "stale_view":
+            result(client.post(resume, json={**request, "expected_pending_ids":"[]"}), 409)
+            assert result(client.get(path))["scheduled_issue"] and attempts == []
+            return
+        if outcome == "new_during_review":
+            messages.append({"id":"other-one", "internalDate":"2", "payload":{"headers":[{"name":"From", "value":"recruiter@example.com"}]}})
+            assert "new message" in result(client.post(resume, json=request), 409)["detail"]
+            paused = result(client.get(path))
+            assert set(json.loads(paused["scheduled_review_pending_ids"])) == {"auto-one", "other-one"}
+            request = {"expected_issue":paused["scheduled_issue"], "expected_pending_ids":paused["scheduled_review_pending_ids"]}
+        resumed = result(client.post(resume, json=request))
+        assert resumed["schedule_id"] and resumed["scheduled_issue"] == ""
+        assert "auto-one" in json.loads(resumed["scheduled_reviewed_message_ids"])
+        assert result(client.post("/api/gmail/check")) == {"replies":0}
+        assert result(client.get(path))["scheduled_issue"] == ""
+        if outcome == "send":
+            messages.append({"id":"other-one", "internalDate":"2", "payload":{"headers":[{"name":"From", "value":"recruiter@example.com"}]}})
+            result(client.post("/api/gmail/check"))
+            paused = result(client.get(path))
+            assert paused["scheduled_issue"] and json.loads(paused["scheduled_review_pending_ids"]) == ["other-one"]
+            resumed = result(client.post(resume, json={"expected_issue":paused["scheduled_issue"],
+                             "expected_pending_ids":paused["scheduled_review_pending_ids"]}))
+        store.write("UPDATE gmail_follow_up_schedule SET send_at='2000-01-01T00:00:00Z' WHERE id=?", (resumed["schedule_id"],))
+        for _ in range(100):
+            updated = result(client.get(path))
+            if not updated["schedule_id"] or updated["scheduled_issue"]:
+                break
+            time.sleep(.01)
+        assert attempts == [("thread-one", "Approved follow-up.")]
+        assert updated["schedule_id"] is None
 
 
 def test_stripe_author_research_requires_recent_engineering_bio(monkeypatch):
@@ -1132,6 +1218,8 @@ def test_schema_migration_keeps_existing_conversations_and_jobs(desk):
         conn.execute("ALTER TABLE events DROP COLUMN message")
         conn.execute("ALTER TABLE outreach DROP COLUMN follow_up_draft")
         conn.execute("ALTER TABLE outreach DROP COLUMN conversation_url")
+        conn.execute("ALTER TABLE gmail_follow_up_schedule DROP COLUMN reviewed_message_ids")
+        conn.execute("ALTER TABLE gmail_follow_up_schedule DROP COLUMN review_pending_ids")
         conn.execute("ALTER TABLE contacts DROP COLUMN profile_url")
         conn.execute("ALTER TABLE contacts DROP COLUMN email")
         conn.execute("ALTER TABLE jobs DROP COLUMN hidden")
@@ -1143,6 +1231,7 @@ def test_schema_migration_keeps_existing_conversations_and_jobs(desk):
     store.initialize(seed=False)
     existing = store.outreach(item["id"])
     assert existing["state"] == "waiting" and existing["draft"] == item["draft"]
+    assert existing["scheduled_reviewed_message_ids"] is None and existing["scheduled_review_pending_ids"] is None
     assert existing["follow_up_draft"] == ""
     assert existing["conversation_url"] == ""
     assert existing["profile_url"] == "" and existing["email"] == ""

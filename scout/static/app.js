@@ -5,7 +5,7 @@ const S = {page:"jobs", info:null, offset:0, search:"", region:"", latest:false,
 const regions = {india_remote:"Remote from India",india:"India-based",us_remote:"U.S. remote",unclear:"Eligibility unclear",other:"Other location"};
 const channels = {linkedin:"LinkedIn",gmail:"Gmail",community:"Referral community"};
 const stages = {draft:"Draft",waiting:"Waiting for reply",replied:"Replied",offered:"Referral offered",submitted:"Referral submitted",closed:"Closed"};
-const historyLabels = {sent:"Request sent",checked:"Checked, no reply",snoozed:"Snoozed",followed_up:"Follow-up sent",replied:"Reply recorded",offered:"Referral offered",submitted:"Referral submitted",closed:"Closed",undo_send:"Send corrected",reply_detected:"Gmail reply detected"};
+const historyLabels = {sent:"Request sent",checked:"Checked, no reply",snoozed:"Snoozed",followed_up:"Follow-up sent",replied:"Reply recorded",offered:"Referral offered",submitted:"Referral submitted",closed:"Closed",undo_send:"Send corrected",reply_detected:"Gmail reply detected",schedule_resumed:"Schedule resumed"};
 const E = (x = "") => String(x ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const num = x => Number(x ?? 0).toLocaleString();
 const date = (x, time=false) => {
@@ -397,6 +397,8 @@ function showConversation() {
   const {mail}=S.info, isGmail=i.channel==="gmail";
   const sendRequest=isGmail&&mail.send_enabled&&i.email&&!i.gmail_send_pending;
   const sendFollowUp=isGmail&&mail.send_enabled&&i.thread_id&&i.mail_account===mail.account&&!i.gmail_send_pending&&!i.schedule_id;
+  const resumeSchedule=isGmail&&mail.send_enabled&&mail.scheduling&&i.mail_account===mail.account&&!i.gmail_send_pending&&
+    ["The contact sent an automatic or nonstandard reply. Review the thread before following up.","Another sender replied in the thread. Review it before following up."].includes(i.scheduled_issue);
   const original = i.events.find(e=>e.kind==="sent"&&e.message)?.message || i.draft;
   const event=(label,action,style="small")=>B(label,`event-${action}`,i.id,style);
   dialog(i.person,`${i.company} · ${channels[i.channel]} · ${stages[i.state]}`,`<p class="micro">${E(i.job_title)}${i.due_at?` · Next check ${date(i.due_at)}`:""}</p>
@@ -422,10 +424,11 @@ function showConversation() {
     <form class="form" data-form="follow-up" data-id="${i.id}">
       <label>${i.schedule_id?"Scheduled message":"Follow-up draft"}<textarea id="follow-up-text" name="text" maxlength="4000" required ${i.schedule_id?"readonly":""}>${E(i.scheduled_message || i.follow_up_draft || followUpText(i))}</textarea></label>
       ${i.schedule_id?`<p class="hint">${i.scheduled_issue||i.gmail_send_pending?"Scheduled send needs review":`Scheduled for ${date(i.scheduled_send_at,true)}`} · To ${E(i.mail_peer)}</p>
-      ${i.scheduled_issue?`<p class="evidence">${E(i.scheduled_issue)}</p>${i.gmail_send_pending?"":'<p class="hint">Open the Gmail thread to review it. You can cancel this schedule and follow up manually.</p>'}`:""}`:
+      ${i.scheduled_issue?`<p class="evidence">${E(i.scheduled_issue)}</p>${i.gmail_send_pending?"":`<p class="hint">${resumeSchedule?"Review the Gmail thread before resuming. If the scheduled time has passed, it may send immediately.":"Open the Gmail thread to review it. You can cancel this schedule and follow up manually."}</p>`}`:""}`:
       `<p class="hint">${sendFollowUp?`Send to ${E(i.mail_peer)} in the original Gmail thread.`:"Send it in the original conversation, then record the send here."}</p>`}
       <div class="actions">${sendFollowUp?B("Send Gmail follow-up","gmail-follow-up",i.id,"primary"):""}${B("Copy follow-up","copy-follow-up","",sendFollowUp?"":"primary")}
       ${i.schedule_id?(!i.gmail_send_pending?B("Cancel scheduled send","gmail-cancel-schedule",i.id,"small"):""):'<button class="button">Save draft</button>'}
+      ${resumeSchedule?B("Resume after reviewing Gmail","gmail-resume-schedule",i.id,"small"):""}
       ${event("Record follow-up sent","followed_up","")}</div>
       ${sendFollowUp&&mail.scheduling?`<details class="section"><summary>Schedule a Gmail follow-up</summary>
       <label>Send date and time<input type="datetime-local" id="follow-up-send-at"></label>
@@ -516,6 +519,21 @@ async function changeGmailSchedule(id,cancel=false) {
   if(S.page==="outreach") await render();
   notice(cancel?"Scheduled follow-up canceled.":"Gmail follow-up scheduled.");
 }
+async function resumeGmailSchedule(id) {
+  const title=$("#dialog-title"),item=S.item;
+  let updated;
+  try {
+    updated=await api(`/outreach/${id}/gmail/follow-up-schedule/${encodeURIComponent(item.schedule_id)}/resume`,"POST",
+      {expected_issue:item.scheduled_issue,expected_pending_ids:item.scheduled_review_pending_ids});
+  } catch(error) {
+    const current=await api(`/outreach/${id}`).catch(()=>null);
+    if(current&&modal.open&&title.isConnected) {S.item=current;showConversation();}
+    throw error;
+  }
+  if(modal.open&&title.isConnected) {S.item=updated;showConversation();}
+  if(S.page==="outreach") await render();
+  notice(updated.state==="replied"?"Gmail already has a reply from this contact.":"Follow-up schedule resumed.");
+}
 async function copy(text) {
   await navigator.clipboard.writeText(text);
   notice("Copied to clipboard.");
@@ -541,6 +559,7 @@ async function act(action,id) {
     "mail-connect-send":async()=>{location.href=(await api("/gmail/authorize","POST",{send:true})).url;},
     "gmail-send":()=>sendGmail(id),"gmail-follow-up":()=>sendGmail(id,true),
     "gmail-schedule":()=>changeGmailSchedule(id),"gmail-cancel-schedule":()=>changeGmailSchedule(id,true),
+    "gmail-resume-schedule":()=>resumeGmailSchedule(id),
     "forget-brave":async()=>{await saveIntegration("brave","");},
     "forget-google":async()=>{await saveIntegration("google","");},
     "mail-disconnect":async()=>{await api("/gmail/disconnect","POST");await refreshState();await render();notice("Gmail disconnected.");},
