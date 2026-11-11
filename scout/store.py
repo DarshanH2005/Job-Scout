@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .feeds import EARLY_SCORE, assess, eligibility_evidence, required_timezone, work_authorization_evidence
+from .feeds import EARLY_SCORE, assess, eligibility_evidence, graduation_warning, required_timezone, work_authorization_evidence
 
 DATA = Path(__file__).with_name("companies.csv")
 EXPANDED_SOURCES = ("Databricks", "HP", "ServiceNow", "Snowflake", "Zscaler")
@@ -206,6 +206,10 @@ class Store:
     def set_setting(self, key, value):
         self.write("INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
+    def graduation_year(self):
+        value = self.setting("graduation_year")
+        return int(value) if value.isdecimal() and 2000 <= int(value) <= 2100 else None
+
     def stats(self):
         return self.one("""
             SELECT
@@ -297,18 +301,23 @@ class Store:
                    coalesce(julianday(j.posted_at),julianday(j.first_seen)) DESC, j.id DESC"""
         if view == "saved":
             order = "CASE WHEN j.applied_at IS NULL THEN j.application_target END ASC NULLS LAST, " + order
-        return self.all(f"""SELECT j.id,j.title,j.location,j.url,j.apply_url,j.posted_at,j.first_seen,j.last_seen,j.new_scan,
+        rows = self.all(f"""SELECT j.id,j.title,j.location,j.url,j.apply_url,j.posted_at,j.first_seen,j.last_seen,j.new_scan,
                                    j.region,j.evidence,j.reason,j.score,j.saved,j.applied_at,j.archived,j.manual,j.hidden,
-                                   j.deadline_at,j.application_target,
+                                   j.deadline_at,j.application_target,j.description AS _description,
                                    c.name AS company,c.provider,c.status AS source_status
                             FROM jobs j JOIN companies c ON c.id=j.company_id WHERE {where}
                             ORDER BY {order} LIMIT 31 OFFSET ?""", (*args, offset))
+        year = self.graduation_year()
+        for row in rows:
+            row["graduation_warning"] = graduation_warning(row.pop("_description"), year)
+        return rows
 
     def job(self, job_id):
         row = self.one("""SELECT j.*, c.name AS company, c.provider, c.status AS source_status
                           FROM jobs j JOIN companies c ON c.id=j.company_id WHERE j.id=?""", (job_id,))
         if row:
             row["eligibility"] = eligibility_evidence(row["description"])
+            row["graduation_warning"] = graduation_warning(row["description"], self.graduation_year())
             row["work_authorization"] = work_authorization_evidence(row["description"])
             row["referrals"] = self.all("""SELECT o.id, o.contact_id, o.channel, o.state, o.due_at, c.name AS person
                 FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.job_id=?

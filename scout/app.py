@@ -21,7 +21,7 @@ from pydantic import AwareDatetime, BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import credentials
-from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, public_url, work_authorization_evidence, workday_base, workday_detail, workday_path
+from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, graduation_warning, public_url, work_authorization_evidence, workday_base, workday_detail, workday_path
 from .gmail import Gmail, headers, incoming_reply
 from .research import ResearchCache, find_people, rewrite
 from .store import OUTREACH_SELECT, Store, now
@@ -54,6 +54,10 @@ class JobFlags(BaseModel):
     applied: bool | None = None
     hidden: bool | None = None
     application_target: date | None = None
+
+
+class CandidateProfile(BaseModel):
+    graduation_year: int | None = Field(default=None, ge=2000, le=2100)
 
 
 class ContactInput(BaseModel):
@@ -283,6 +287,7 @@ def create_app(db_path=None, seed=True):
         account = store.setting("gmail_account")
         return {"stats": store.stats(), "scan": store.one("SELECT * FROM scans ORDER BY id DESC LIMIT 1"),
                 "full_scan": store.last_full_scan(),
+                "graduation_year": store.graduation_year(),
                 "search_configured": bool(credentials.brave_key()),
                 "search_from_env": bool(os.getenv("SCOUT_BRAVE_KEY")),
                 "rewrite_configured": bool(os.getenv("SCOUT_OPENAI_KEY") and os.getenv("SCOUT_OPENAI_MODEL")),
@@ -293,6 +298,11 @@ def create_app(db_path=None, seed=True):
                          "checked_at": store.setting("gmail_checked_at"),
                          "issue": store.setting("gmail_issue"),
                          "linkedin_hints": store.setting("linkedin_hints") == "1"}}
+
+    @app.put("/api/profile")
+    async def update_profile(data: CandidateProfile):
+        store.set_setting("graduation_year", str(data.graduation_year) if data.graduation_year is not None else "")
+        return {"graduation_year": store.graduation_year()}
 
     @app.put("/api/integrations/{name}")
     async def configure_integration(name: str, data: IntegrationInput):
@@ -422,6 +432,7 @@ def create_app(db_path=None, seed=True):
                 raise ValueError("The employer posting contained no description.")
             item["description"] = description
             item["eligibility"] = eligibility_evidence(description)
+            item["graduation_warning"] = graduation_warning(description, store.graduation_year())
             item["work_authorization"] = work_authorization_evidence(description)
             if not workplace:
                 workplace = next((value for value in ("Remote", "Hybrid")

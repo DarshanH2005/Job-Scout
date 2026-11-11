@@ -92,7 +92,7 @@ function jobRow(job) {
   return `<article class="panel job-row"><div class="job-mark" aria-hidden="true">${E(mark)}</div>
     <div><div class="job-company">${E(job.company)} · ${job.posted_at?"Posted":"First seen"} ${date(job.posted_at||job.first_seen)}</div>
     <button class="job-title" data-action="job" data-id="${job.id}">${E(job.title)}</button>
-    <div class="meta">${tag(regions[job.region],job.region.startsWith("india")?"good":"")}${freshness}${job.hidden?tag("Hidden from feed"):""}${job.applied_at?tag("Applied","good"):""}
+    <div class="meta">${tag(regions[job.region],job.region.startsWith("india")?"good":"")}${freshness}${job.graduation_warning?tag("Check graduation year","warn"):""}${job.hidden?tag("Hidden from feed"):""}${job.applied_at?tag("Applied","good"):""}
     ${!job.applied_at&&job.application_target?tag(`Your target ${date(job.application_target)}`,"good"):""}
     ${!job.applied_at&&job.deadline_at?tag(`Employer deadline ${date(job.deadline_at)}`,"warn"):""}</div>
     <div class="micro">${E(job.reason)}</div></div><div class="actions">${B("Review","job",job.id,"small")}${L("Apply",job.apply_url)}</div></article>`;
@@ -195,6 +195,9 @@ function settings() {
   const {mail,search_configured,search_from_env,rewrite_configured}=S.info;
   return `${head("Settings","Connect optional services for public research and reply checks.")}
   <div class="settings-grid">
+    <section class="panel padded"><h3>Your graduation year</h3><p>Flag postings that explicitly mention a different graduation year. This does not determine eligibility.</p>
+    <form class="form section" data-form="profile"><label>Expected graduation year<input type="number" name="graduation_year" min="2000" max="2100" step="1" value="${E(S.info.graduation_year??"")}" placeholder="For example, 2027"></label>
+    <p class="hint">Stored locally. Clear the field to turn off these warnings.</p><div><button class="button">Save year</button></div></form></section>
     <section class="panel padded"><h3>Public contact research</h3><p>Brave searches public sources after you pick a job. Saved contacts and LinkedIn search queries are available immediately.</p>
     ${tag(search_configured?"Brave configured":"Brave key needed",search_configured?"good":"warn")}
     ${search_from_env?"<p class='section'>Managed through the local environment.</p>":`<form class="form section" data-form="brave">
@@ -268,6 +271,7 @@ function updateJob(job) {
     job.details_status=S.job.details_status;
     job.detail_assessment=S.job.detail_assessment;
     job.detail_location=S.job.detail_location;
+    job.graduation_warning=S.job.graduation_warning;
   }
   S.job=job;
   showJob();
@@ -292,6 +296,7 @@ function showJob() {
     ${job.detail_location?`<div class="evidence"><strong>Location from the full posting · ${E(regions[job.detail_location.region])}</strong><br>${E(job.detail_location.evidence)}<br><span class="hint">The job feed and filters still use the scan summary.</span></div>`:""}
     ${job.details_status==="unavailable"?'<p class="hint">The employer description could not be loaded. Open the posting to review its requirements.</p>':""}
     ${job.detail_assessment?`<div class="evidence"><strong>Review experience</strong><br>${E(job.detail_assessment)}</div>`:""}
+    ${job.graduation_warning?`<div class="evidence"><strong>Check graduation year</strong><br>Your saved year is ${E(job.graduation_warning.saved_year)}. The posting says: ${E(job.graduation_warning.excerpt)}<br><span class="hint">Review the full requirements; this is not an eligibility decision.</span></div>`:""}
     ${job.eligibility?.length?`<section class="evidence" aria-label="Eligibility evidence"><strong>Eligibility evidence</strong>
       <ul class="eligibility-list">${job.eligibility.map(item=>`<li>${tag(item.label)} <span>${E(item.text)}</span></li>`).join("")}</ul></section>`:""}
     ${job.work_authorization?.length?`<section class="evidence" aria-label="Work authorization and visa"><strong>Work authorization and visa</strong>
@@ -562,6 +567,10 @@ document.addEventListener("submit",event=>{
   const data=Object.fromEntries(new FormData(form)),id=form.dataset.id;
   withButton($("button:not([type=button])",form),async()=>{
     switch(form.dataset.form) {
+      case "profile":
+        await api("/profile","PUT",{graduation_year:data.graduation_year?Number(data.graduation_year):null});
+        await refreshState();notice("Graduation year updated.");
+        break;
       case "brave":
         await saveIntegration("brave",data.value);
         break;

@@ -66,6 +66,7 @@ EDUCATION = re.compile(
 )
 DEGREE = re.compile(r"\b(?:degree|graduat\w*)\b", re.I)
 GRAD_DATE = re.compile(r"\b(?:by|between|before|after|in|through|from|expected|class of)\b[^.!?;\n]{0,36}\b20\d{2}\b", re.I)
+GRAD_YEAR_MENTION = re.compile(r"\b(?:graduat\w*|class of)\b[^.!?;\n]{0,140}\b20\d{2}\b", re.I)
 MINIMUM_HEADING = re.compile(r"(?:minimum|basic|required) (?:requirements|qualifications|experience|skills)|requirements|required|must have(?: (?:skills|qualifications|requirements))?", re.I)
 PREFERRED_HEADING = re.compile(r"preferred(?: (?:requirements|qualifications|experience|skills))?|nice to have|bonus points", re.I)
 OTHER_HEADING = re.compile(r"(?:about (?:us|the role|the team)|responsibilities|benefits|compensation|in-office expectations|what (?:you.ll do|we offer|we.re looking for)|equal opportunity)", re.I)
@@ -280,11 +281,37 @@ def eligibility_evidence(description, limit=4):
                 evidence.append({"label": "Application deadline", "text": excerpt})
                 seen.add(excerpt)
             elif (YEARS.search(excerpt) or EXPERIENCE_MONTHS.search(excerpt) or EDUCATION.search(excerpt)
-                    or (DEGREE.search(excerpt) and GRAD_DATE.search(excerpt))):
+                    or (DEGREE.search(excerpt) and GRAD_DATE.search(excerpt)) or GRAD_YEAR_MENTION.search(excerpt)):
                 evidence.append({"label": section, "text": excerpt})
                 seen.add(excerpt)
     priority = {"Application deadline": 0, "Required": 1, "From the posting": 2, "Preferred": 3}
     return sorted(evidence, key=lambda item: priority[item["label"]])[:limit]
+
+
+def graduation_warning(description, graduation_year):
+    """Flag explicit year differences without deciding whether the user qualifies."""
+    if not graduation_year:
+        return None
+    mentions = []
+    for item in eligibility_evidence(description, limit=None):
+        excerpt = item["text"]
+        if item["label"] in {"Preferred", "Application deadline"} or re.match(r"^\W*(?:preferred|nice to have|bonus|ideally)\b", excerpt, re.I):
+            continue
+        match = GRAD_YEAR_MENTION.search(excerpt)
+        if not match:
+            continue
+        clause = match.group()
+        if re.search(r"\b(?:before|after|by|prior|earlier|later|not|without|unless|any year|regardless)\b", excerpt, re.I):
+            return None
+        years = [int(value) for value in re.findall(r"\b20\d{2}\b", clause)]
+        if not years:
+            continue
+        is_range = bool(re.search(r"\bbetween\b", clause, re.I) or
+                        re.search(r"\b20\d{2}\s*(?:-|–|—|to|through)\s*(?:[A-Za-z]+\s+)?20\d{2}\b", clause, re.I))
+        if graduation_year in years or (is_range and min(years) <= graduation_year <= max(years)):
+            return None
+        mentions.append(excerpt)
+    return {"saved_year": graduation_year, "excerpt": mentions[0]} if mentions else None
 
 
 def work_authorization_evidence(description, limit=3):

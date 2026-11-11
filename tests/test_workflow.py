@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import scout.app as app_module
-from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, normalize, work_authorization_evidence
+from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, graduation_warning, normalize, work_authorization_evidence
 from scout.gmail import Gmail, SEND_SCOPE, SCOPE, incoming_reply
 from scout.research import ResearchCache, affirm_authors, cloudflare_authors, datadog_speakers, public_candidates, rank_candidates, stripe_authors
 from scout.store import Store
@@ -764,6 +764,7 @@ def test_workday_requires_complete_stable_snapshot(case):
 
 def test_workday_details_are_checked_and_loaded_on_demand(desk, monkeypatch):
     client, store = desk
+    store.set_setting("graduation_year", "2027")
     job = saved_job(client)
     path = "/job/India-Bangalore/Junior-Data-Engineer_R1"
     url = "https://sample.wd5.myworkdayjobs.com/External" + path
@@ -771,7 +772,7 @@ def test_workday_details_are_checked_and_loaded_on_demand(desk, monkeypatch):
     store.write("UPDATE jobs SET external_id=?,url=?,manual=0,description='',location='2 Locations',region='other',evidence='2 Locations' WHERE id=?",
                 (path, url, job["id"]))
     detail = {"jobPostingInfo":{"externalUrl":url, "canApply":True, "location":"Bengaluru, India", "additionalLocations":["Pune, India"],
-              "jobDescription":"<h2>Minimum requirements</h2><p>3+ years of experience.</p><p>Must be authorized to work in India.</p>"}}
+              "jobDescription":"<h2>Minimum requirements</h2><p>3+ years of experience.</p><p>Graduating in 2028.</p><p>Must be authorized to work in India.</p>"}}
     status = [200]
 
     def respond(request):
@@ -783,6 +784,7 @@ def test_workday_details_are_checked_and_loaded_on_demand(desk, monkeypatch):
                         lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
     loaded = result(client.get(f"/api/jobs/{job['id']}"))
     assert loaded["details_status"] == "loaded" and "3+ years" in loaded["detail_assessment"]
+    assert loaded["graduation_warning"] == {"saved_year":2027, "excerpt":"Graduating in 2028."}
     assert loaded["detail_location"]["region"] == "india"
     assert loaded["work_authorization"] == ["Must be authorized to work in India."]
     assert store.job(job["id"])["description"] == ""
@@ -1140,6 +1142,38 @@ def test_job_detail_quotes_required_and_preferred_eligibility(desk):
     assert eligibility_evidence("Applications close on November 30, 2026.") == [
         {"label": "Application deadline", "text": "Applications close on November 30, 2026."},
     ]
+
+
+def test_graduation_year_warning_is_conservative():
+    assert graduation_warning("Working towards a B.Tech graduating in 2028.", 2027) == {
+        "saved_year":2027, "excerpt":"Working towards a B.Tech graduating in 2028."}
+    assert graduation_warning("Class of 2028", 2027)["excerpt"] == "Class of 2028"
+    assert graduation_warning("Graduating in 2028.", None) is None
+    assert graduation_warning("Graduating in 2027 or 2028.", 2027) is None
+    assert graduation_warning("Graduating between December 2026 and June 2028.", 2027) is None
+    assert graduation_warning("Graduating 2026 to 2028.", 2027) is None
+    assert graduation_warning("Preferred qualifications\nGraduating in 2028.", 2027) is None
+    assert graduation_warning("Not graduating in 2028.", 2027) is None
+    assert graduation_warning("Must graduate before December 2028.", 2027) is None
+    assert graduation_warning("Graduating in 2028. Graduating in 2027.", 2027) is None
+
+
+def test_profile_year_flags_jobs_and_can_be_cleared(desk):
+    client, _ = desk
+    job = result(client.post("/api/jobs", json={"company":"Example", "title":"Software Engineer Intern",
+                 "url":"https://example.com/intern-year", "description":"Class of 2028"}), 201)
+    assert result(client.get(f"/api/jobs/{job['id']}"))["graduation_warning"] is None
+    result(client.put("/api/profile", json={"graduation_year":1900}), 422)
+    assert result(client.put("/api/profile", json={"graduation_year":2027}))["graduation_year"] == 2027
+    assert result(client.get("/api/state"))["graduation_year"] == 2027
+    rows = result(client.get("/api/jobs"))["items"]
+    assert rows[0]["graduation_warning"] == {"saved_year":2027, "excerpt":"Class of 2028"}
+    assert "_description" not in rows[0]
+    assert result(client.get(f"/api/jobs/{job['id']}"))["graduation_warning"] == rows[0]["graduation_warning"]
+    result(client.put("/api/profile", json={"graduation_year":2028}))
+    assert result(client.get(f"/api/jobs/{job['id']}"))["graduation_warning"] is None
+    result(client.put("/api/profile", json={"graduation_year":None}))
+    assert result(client.get("/api/state"))["graduation_year"] is None
 
 
 def test_work_authorization_shows_employer_wording_with_caveats(desk):
