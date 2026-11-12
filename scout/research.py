@@ -8,12 +8,12 @@ import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
 import httpx
 
-from .feeds import clean, public_url
+from .feeds import INDIA, clean, public_url
 from .credentials import brave_key
 
 NAME = re.compile(r"[A-Z][\w.'’\-]+(?:\s+[A-Z][\w.'’\-]+){1,3}", re.UNICODE)
@@ -27,6 +27,8 @@ DATADOG_SPEAKERS = "https://dash.datadoghq.com/sessions/speakers/"
 AFFIRM_FEED = "https://tech.affirm.com/feed"
 ABNORMAL_STORIES = "https://abnormal.ai/careers/stories"
 ABNORMAL_SITEMAP = "https://abnormal.ai/sitemap.xml"
+CROSSREF_WORKS = "https://api.crossref.org/works"
+CROSSREF_TOPIC = re.compile(r"\b(?:machine learning|deep learning|neural|language models?|artificial intelligence|generative ai|graph learning|gnns?|data science|data mining|fraud detection|computer vision)\b", re.I)
 OFFICIAL_CACHE_SECONDS = 15 * 60
 ROLE_AREAS = {
     "infrastructure": re.compile(r"\b(?:infrastructure|platform|systems?|kubernetes|cloud|devops|sre)\b", re.I),
@@ -61,7 +63,8 @@ def rank_candidates(job, candidates):
     ranked = []
     for person in candidates:
         areas = relevant_areas(job, person)
-        explanation = (f"Job and profile suggest a shared area in {', '.join(areas)}. " if areas else
+        evidence = "cited paper" if person.get("title") == "AI / data science paper author" else "profile"
+        explanation = (f"Job and {evidence} suggest a shared area in {', '.join(areas)}. " if areas else
                        "The source does not establish a matching specialty. ")
         ranked.append((len(areas), {**person, "reason": person["reason"] + " " + explanation +
                                      "The job's team is unconfirmed."}))
@@ -326,13 +329,75 @@ async def abnormal_engineers():
         return [person for person in await asyncio.gather(*(story(url) for url in urls)) if person]
 
 
+async def crossref_authors(job):
+    """Find named authors with an explicit employer affiliation in recent technical papers."""
+    company = job["company"].strip()
+    if len(company) < 4:
+        return []
+    today = date.today()
+    async with httpx.AsyncClient(timeout=12, follow_redirects=False,
+                                 headers={"User-Agent":"JobScout/1.0 (https://github.com/DarshanH2005/Job-Scout)"}) as client:
+        response = await client.get(CROSSREF_WORKS, params={"query.affiliation":company,
+            "query.bibliographic":"machine learning", "filter":f"from-pub-date:{today - timedelta(days=730)},until-pub-date:{today}",
+            "rows":15})
+        response.raise_for_status()
+        items = response.json()["message"]["items"]
+    if not isinstance(items, list):
+        raise ValueError("Crossref returned an unexpected result.")
+    people, seen = [], set()
+    for work in items[:15]:
+        try:
+            if not isinstance(work, dict):
+                continue
+            title = clean((work.get("title") or [""])[0])
+            doi = str(work.get("DOI") or "")
+            parts = (work.get("published") or {}).get("date-parts", [[]])[0]
+            published = date(int(parts[0]), int(parts[1]) if len(parts) > 1 else 1, int(parts[2]) if len(parts) > 2 else 1)
+            if (not CROSSREF_TOPIC.search(title) or re.search(r"\b(?:retraction|retracted|withdrawn|erratum|corrigendum)\b", title, re.I)
+                    or not re.fullmatch(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", doi, re.I)
+                    or not today - timedelta(days=730) <= published <= today):
+                continue
+            source = CROSSREF_WORKS + "/" + quote(doi, safe="")
+            paper_url = "https://doi.org/" + quote(doi, safe="/;()_.-")
+            for author in (work.get("author") or [])[:30]:
+                if not isinstance(author, dict):
+                    continue
+                name = clean(" ".join((author.get("given") or "", author.get("family") or "")))
+                affiliations = author.get("affiliation") or []
+                if not isinstance(affiliations, list):
+                    continue
+                affiliation = next((clean(aff.get("name")) for aff in affiliations if isinstance(aff, dict)
+                                    and re.search(r"(?<!\w)" + re.escape(company) + r"(?!\w)", clean(aff.get("name")), re.I)), "")
+                if not NAME.fullmatch(name) or CONTENT_TITLE.search(name) or not affiliation or name.casefold() in seen:
+                    continue
+                people.append(dict(name=name, title="AI / data science paper author", source=source, paper_url=paper_url,
+                                   notes=f"{affiliation[:140]} · {title[:190]}",
+                                   reason=f"A {published.year} paper lists this person with {company}. Verify current role and location."))
+                seen.add(name.casefold())
+        except (ValueError, TypeError, IndexError, AttributeError):
+            continue
+    def diverse(rows):
+        first, remaining, papers = [], [], set()
+        for person in rows:
+            (remaining if person["source"] in papers else first).append(person)
+            papers.add(person["source"])
+        return first + remaining
+    if job.get("region") in {"india", "india_remote"}:
+        india = [person for person in people if INDIA.search(person["notes"])]
+        other = [person for person in people if not INDIA.search(person["notes"])]
+        return diverse(india) + diverse(other)
+    return diverse(people)
+
+
 class ResearchCache:
     def __init__(self):
         self.entries = {}
         self.locks = {company: asyncio.Lock() for company in ("stripe", "cloudflare", "datadog", "affirm", "abnormal ai")}
+        self.crossref_lock = asyncio.Lock()
+        self.crossref_next = 0.0
 
     async def authors(self, company, search):
-        async with self.locks[company]:
+        async with self.locks.setdefault(company, asyncio.Lock()):
             cached = self.entries.get(company)
             if cached and cached[0] > time.monotonic():
                 return cached[1], True
@@ -340,6 +405,29 @@ class ResearchCache:
             if people:
                 self.entries[company] = (time.monotonic() + OFFICIAL_CACHE_SECONDS, people)
             return people, False
+
+    async def publications(self, key, search):
+        # Crossref's public pool allows one concurrent request and five per second.
+        async with self.crossref_lock:
+            cached = self.entries.get(key)
+            if cached and cached[0] > time.monotonic():
+                return cached[1], True
+            wait = self.crossref_next - time.monotonic()
+            if wait > 1:
+                return [], False  # A recent rate limit or outage is still cooling down.
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                result = await self.authors(key, search)
+                if not result[0]:
+                    self.entries[key] = (time.monotonic() + 300, [])
+                return result
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429 or exc.response.status_code >= 500:
+                    self.crossref_next = time.monotonic() + 30
+                raise
+            finally:
+                self.crossref_next = max(self.crossref_next, time.monotonic() + .25)
 
 
 async def find_people(store, job, cache=None):
@@ -392,10 +480,28 @@ async def find_people(store, job, cache=None):
                         status = "official"
         except (httpx.HTTPError, ElementTree.ParseError, ValueError):
             pass
+    publication_cached = False
+    if len(people) < 3 and specialty in {"data science", "machine learning"}:
+        try:
+            key = f"crossref:{company}:{specialty}:{job.get('region', '')}"
+            if cache:
+                authors, publication_cached = await cache.publications(key, lambda: crossref_authors(job))
+            else:
+                authors = await crossref_authors(job)
+            seen = {person["name"].casefold() for person in people}
+            for person in rank_candidates(job, authors):
+                if person["name"].casefold() not in seen and len(people) < 3:
+                    people.append(person)
+                    seen.add(person["name"].casefold())
+                    if status in {"needs_key", "unavailable"}:
+                        status = "publications"
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+            pass
     for person in people:
         if person.get("id"):
             person["prior_conversations"] = store.contact_conversations(person["id"], exclude_job_id=job["id"])
-    return {"people": people, "query": query, "status": status, "official_cached": official_cached}
+    return {"people": people, "query": query, "status": status, "official_cached": official_cached,
+            "publication_cached": publication_cached}
 
 
 async def rewrite(text):

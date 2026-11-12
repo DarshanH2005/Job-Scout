@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import scout.app as app_module
 from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, graduation_warning, normalize, work_authorization_evidence
 from scout.gmail import Gmail, SEND_SCOPE, SCOPE, incoming_reply
-from scout.research import ResearchCache, abnormal_engineers, affirm_authors, cloudflare_authors, datadog_speakers, public_candidates, rank_candidates, search_terms, stripe_authors
+from scout.research import ResearchCache, abnormal_engineers, affirm_authors, cloudflare_authors, crossref_authors, datadog_speakers, public_candidates, rank_candidates, search_terms, stripe_authors
 from scout.store import Store
 
 
@@ -740,6 +740,64 @@ def test_abnormal_stories_require_recent_named_engineering_interview(monkeypatch
     assert fetched.count("/careers/stories/alex-example") == 1
 
 
+def test_crossref_authors_require_recent_technical_paper_and_person_affiliation(monkeypatch):
+    from datetime import date
+    today = date.today()
+    def work(doi, title, author, affiliation, year=None):
+        return {"DOI":doi, "title":[title], "published":{"date-parts":[[year or today.year]]},
+                "author":[{"given":author.split()[0], "family":author.split()[1], "affiliation":[{"name":affiliation}]}]}
+    rows = [work("10.1234/us", "Machine Learning for Fraud Detection", "Alex Example", "Mastercard, USA"),
+            work("10.1234/india", "Neural Networks for Graph Learning", "Blair Example", "Mastercard, India"),
+            work("10.1234/india", "Neural Networks for Graph Learning", "Iris Example", "Mastercard, India"),
+            work("10.1234/india-two", "Deep Learning Models", "Jules Example", "Mastercard, India"),
+            work("10.1234/other", "Machine Learning for Fraud Detection", "Casey Example", "Other Company"),
+            work("10.1234/stale", "Neural Networks for Graph Learning", "Dana Example", "Mastercard", today.year - 4),
+            work("10.1234/future", "Machine Learning for Fraud Detection", "Erin Example", "Mastercard", today.year + 1),
+            work("10.1234/retract", "Retraction Notice: Neural Networks", "Fran Example", "Mastercard"),
+            work("bad-url", "Machine Learning for Fraud Detection", "Gwen Example", "Mastercard"),
+            work("10.1234/other-topic", "Annual Banking Survey", "Hana Example", "Mastercard")]
+    def respond(request):
+        assert request.url.host == "api.crossref.org"
+        assert request.url.params["query.affiliation"] == "Mastercard" and request.url.params["rows"] == "15"
+        return httpx.Response(200, json={"message":{"items":rows}})
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr("scout.research.httpx.AsyncClient",
+                        lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    people = asyncio.run(crossref_authors({"company":"Mastercard", "region":"india"}))
+    assert [p["name"] for p in people] == ["Blair Example", "Jules Example", "Iris Example", "Alex Example"]
+    assert people[0]["source"] == "https://api.crossref.org/works/10.1234%2Findia"
+    assert people[0]["paper_url"] == "https://doi.org/10.1234/india"
+    assert str(today.year) in people[0]["reason"] and "Verify current role" in people[0]["reason"]
+    assert "India" in people[0]["notes"] and "email" not in people[0]
+
+
+def test_crossref_publication_cache_limits_and_cools_down_on_429():
+    async def check():
+        cache = ResearchCache()
+        calls = []
+        async def search():
+            calls.append("ok")
+            return [{"name":"Alex Example"}]
+        first, second = await asyncio.gather(cache.publications("paper:one", search), cache.publications("paper:one", search))
+        assert calls == ["ok"] and first[1] is False and second[1] is True
+        cache.crossref_next = 0
+        async def empty():
+            calls.append("empty")
+            return []
+        assert await cache.publications("paper:empty", empty) == ([], False)
+        assert await cache.publications("paper:empty", empty) == ([], True)
+        cache.crossref_next = 0
+        async def limited():
+            calls.append("limited")
+            req = httpx.Request("GET", "https://api.crossref.org/works")
+            raise httpx.HTTPStatusError("rate limit", request=req, response=httpx.Response(429, request=req))
+        with pytest.raises(httpx.HTTPStatusError):
+            await cache.publications("paper:two", limited)
+        assert await cache.publications("paper:three", limited) == ([], False)
+        assert calls == ["ok", "empty", "limited"]
+    asyncio.run(check())
+
+
 def test_data_scientist_research_uses_the_right_specialty():
     assert search_terms({"company":"Mastercard", "title":"Data Scientist I"}) == ('"Mastercard" "data science"', "data science")
     assert search_terms({"company":"Mastercard", "title":"Data Engineer II"})[1] == "data engineering"
@@ -825,6 +883,25 @@ def test_abnormal_people_works_without_paid_search_key(desk, monkeypatch):
     assert first["status"] == "official" and first["people"][0]["name"] == "Alex Example"
     assert "backend" in first["people"][0]["reason"] and "team is unconfirmed" in first["people"][0]["reason"]
     assert second["official_cached"] is True and len(calls) == 1
+
+
+def test_research_papers_supply_key_free_leads_and_are_cached(desk, monkeypatch):
+    client, _ = desk
+    calls = []
+    async def papers(job):
+        calls.append(job["company"])
+        return [{"name":"Blair Example", "title":"AI / data science paper author",
+                 "source":"https://doi.org/10.1234/test", "notes":"Mastercard, India · Neural Networks",
+                 "reason":"A 2025 paper lists this person with Mastercard. Verify current role and location."}]
+    monkeypatch.setattr("scout.research.crossref_authors", papers)
+    monkeypatch.setattr("scout.research.brave_key", lambda: "")
+    job = result(client.post("/api/jobs", json={"company":"Mastercard", "title":"Data Scientist I",
+                         "url":"https://example.com/role", "location":"India"}), 201)
+    path = f"/api/jobs/{job['id']}/people"
+    first, second = result(client.get(path)), result(client.get(path))
+    assert first["status"] == "publications" and first["people"][0]["name"] == "Blair Example"
+    assert "team is unconfirmed" in first["people"][0]["reason"]
+    assert second["publication_cached"] and calls == ["Mastercard"]
 
 
 def test_missing_gmail_credential_dependency_gives_actionable_error(desk, monkeypatch):

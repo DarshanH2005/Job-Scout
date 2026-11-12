@@ -372,6 +372,7 @@ async function findPeople(id) {
     S.people=result.people; S.query=result.query;
     const hint={needs_key:"Set a Brave Search key to enable public research. You can use this LinkedIn query now.",
       official:"Results include public employer sources. Verify current role and location. Add a Brave Search key for broader research.",
+      publications:"Research papers show affiliations at publication time. Verify current employment, location and team.",
       unavailable:"Public search is temporarily unavailable. Try the LinkedIn query.",searched:"Verify current employment before sending."}[result.status];
     target.innerHTML=`${S.people.map((p,index)=>{
       const existing=(S.job.referrals||[]).find(i=>i.contact_id===p.id&&!["closed","submitted"].includes(i.state));
@@ -381,7 +382,7 @@ async function findPeople(id) {
       return `<div class="person"><strong>${E(p.name)}</strong><p>${E(p.title)}</p><p>${E(p.reason)}</p><p>${E(p.notes)}</p>
       ${p.email?`<p class="micro">Email: ${E(p.email)}${p.email_source?" · Source saved":" · No source saved"}</p>`:""}
       ${priorConversations(p.prior_conversations,"job-conversation")}
-      <div class="actions">${L(profile?"Open LinkedIn profile":"Find person on LinkedIn",profile||personSearch)}${p.source?L("View source",p.source):""}${p.email_source?L("Email source",p.email_source):""}${p.id?B("Edit email","contact-email",p.id,"small"):""}${action}</div></div>`;
+      <div class="actions">${L(profile?"Open LinkedIn profile":"Find person on LinkedIn",profile||personSearch)}${p.source?L("View source",p.source):""}${p.paper_url?L("Open paper",p.paper_url):""}${p.email_source?L("Email source",p.email_source):""}${p.id?B("Edit email","contact-email",p.id,"small"):""}${action}</div></div>`;
     }).join("")}
     ${hint?`<p class="hint">${E(hint)}</p>`:""}${result.official_cached?'<p class="hint">Public employer sources were checked within the last 15 minutes.</p>':""}<div class="actions">
     ${L("Search LinkedIn",`https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(S.query)}`)}${B("Copy search query","copy-query","","small")}</div>`;
