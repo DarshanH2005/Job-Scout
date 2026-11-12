@@ -124,6 +124,13 @@ class GmailSchedule(DraftText):
     recipient: str = Field(max_length=254)
 
 
+class GmailInitialSchedule(DraftText):
+    send_at: AwareDatetime
+    account: str = Field(max_length=254)
+    recipient: str = Field(max_length=254)
+    auto_follow_up: AutomaticFollowUp | None = None
+
+
 class ResumeSchedule(BaseModel):
     expected_issue: str = Field(max_length=500)
     expected_pending_ids: str = Field(max_length=52000)
@@ -238,6 +245,10 @@ def create_app(db_path=None, seed=True):
                     JOIN outreach o ON o.id=f.outreach_id
                     WHERE f.send_at<=? AND f.issue='' AND o.state='waiting' AND o.gmail_send_pending=''
                     ORDER BY f.send_at LIMIT 10""", (now(),))
+                initial_due = store.all("""SELECT s.* FROM gmail_initial_schedule s
+                    JOIN outreach o ON o.id=s.outreach_id
+                    WHERE s.send_at<=? AND s.issue='' AND o.state='draft' AND o.gmail_send_pending=''
+                    ORDER BY s.send_at LIMIT 10""", (now(),))
             except Exception:
                 import logging
                 logging.exception("Could not read scheduled Gmail follow-ups")
@@ -256,6 +267,22 @@ def create_app(db_path=None, seed=True):
                         store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE id=? AND issue=''", (issue, schedule["id"]))
                     except Exception:
                         logging.exception("Could not mark scheduled Gmail follow-up for review")
+            for schedule in initial_due:
+                try:
+                    automatic = (AutomaticFollowUp(text=schedule["auto_text"], days=schedule["auto_days"])
+                                 if schedule["auto_days"] else None)
+                    data = GmailSend(text=schedule["message"], account=schedule["account"],
+                                     recipient=schedule["recipient"], auto_follow_up=automatic)
+                    await deliver_gmail(schedule["outreach_id"], data, initial_schedule=schedule)
+                except Exception as exc:
+                    import logging
+                    if not isinstance(exc, HTTPException):
+                        logging.exception("Scheduled Gmail request failed")
+                    issue = exc.detail if isinstance(exc, HTTPException) else "An unexpected error occurred. Check Gmail Sent before rescheduling."
+                    try:
+                        store.write("UPDATE gmail_initial_schedule SET issue=? WHERE id=? AND issue=''", (issue, schedule["id"]))
+                    except Exception:
+                        logging.exception("Could not mark scheduled Gmail request for review")
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -586,9 +613,15 @@ def create_app(db_path=None, seed=True):
 
     @app.patch("/api/outreach/{item_id}")
     async def edit_draft(item_id: int, data: DraftText):
-        if not store.outreach(item_id):
-            fail("Conversation not found.", 404)
-        store.write("UPDATE outreach SET draft=? WHERE id=?", (data.text.strip() or fail("Enter a message."), item_id))
+        text = data.text.strip() or fail("Enter a message.")
+        with store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            item = conn.execute(OUTREACH_SELECT + " WHERE o.id=?", (item_id,)).fetchone()
+            if not item:
+                fail("Conversation not found.", 404)
+            if item["initial_schedule_id"] or item["gmail_send_pending"]:
+                fail("Cancel the scheduled request or resolve its delivery before editing.", 409)
+            conn.execute("UPDATE outreach SET draft=? WHERE id=?", (text, item_id))
         return store.outreach(item_id)
 
     @app.patch("/api/outreach/{item_id}/follow-up")
@@ -681,6 +714,8 @@ def create_app(db_path=None, seed=True):
             conn.execute(f"UPDATE outreach SET {assignments} WHERE id=?", (*changes.values(), item_id))
             if changes.get("state", previous) != "waiting" or action in {"followed_up", "snoozed"}:
                 conn.execute("DELETE FROM gmail_follow_up_schedule WHERE outreach_id=?", (item_id,))
+            if previous == "draft" and changes.get("state", previous) != "draft":
+                conn.execute("DELETE FROM gmail_initial_schedule WHERE outreach_id=?", (item_id,))
             conn.execute("INSERT INTO events(outreach_id,kind,at,note,message) VALUES(?,?,?,?,?)",
                          (item_id, action, stamp, data.note.strip(), message))
         return store.outreach(item_id)
@@ -700,6 +735,57 @@ def create_app(db_path=None, seed=True):
             return {"url": gmail.auth_url(send=bool(data and data.send))}
         except ValueError as exc:
             fail(str(exc))
+
+    @app.post("/api/outreach/{item_id}/gmail/initial-schedule")
+    async def schedule_initial(item_id: int, data: GmailInitialSchedule):
+        text = data.text.strip() or fail("Enter a message.")
+        automatic = data.auto_follow_up
+        automatic_text = automatic.text.strip() if automatic else ""
+        if automatic and not automatic_text:
+            fail("Enter the automatic follow-up message.")
+        if not getattr(app.state, "follow_ups", None) or app.state.follow_ups.done():
+            fail("Scheduled sending is unavailable. Restart Job Scout before scheduling.", 409)
+        send_at = data.send_at.astimezone(timezone.utc).isoformat(timespec="microseconds")
+        if send_at <= now():
+            fail("Choose a date and time in the future.")
+        with store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            item = conn.execute(OUTREACH_SELECT + " WHERE o.id=?", (item_id,)).fetchone()
+            if not item:
+                fail("Conversation not found.", 404)
+            if (item["channel"] != "gmail" or item["state"] != "draft" or item["gmail_send_pending"]
+                    or item["job_archived"] or item["job_source_status"] == "failed"
+                    or not item["email"] or item["email"] != data.recipient
+                    or data.account != store.setting("gmail_account") or store.setting("gmail_send_enabled") != "1"):
+                fail("Connect Gmail and review the recipient and active job before scheduling.", 409)
+            if item["initial_schedule_id"] or item["schedule_id"]:
+                fail("Cancel the existing schedule before setting a new one.", 409)
+            previous = conn.execute("""SELECT 1 FROM outreach o JOIN contacts c ON c.id=o.contact_id
+                WHERE o.id<>? AND o.sent_at IS NOT NULL AND o.state IN ('waiting','replied','offered')
+                AND (o.contact_id=? OR lower(c.email)=lower(?) OR lower(o.mail_peer)=lower(?)) LIMIT 1""",
+                (item_id, item["contact_id"], data.recipient, data.recipient)).fetchone()
+            if previous:
+                fail("This person has an active conversation. Review it before sending another request.", 409)
+            conn.execute("""INSERT INTO gmail_initial_schedule(id,outreach_id,send_at,message,account,recipient,
+                job_title,job_url,auto_text,auto_days) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (uuid4().hex,item_id,send_at,text,data.account,data.recipient,item["job_title"],item["job_url"],
+                 automatic_text,automatic.days if automatic else 0))
+            conn.execute("UPDATE outreach SET draft=?,follow_up_draft=? WHERE id=?", (text,automatic_text,item_id))
+        return store.outreach(item_id)
+
+    @app.delete("/api/outreach/{item_id}/gmail/initial-schedule/{schedule_id}")
+    async def cancel_initial(item_id: int, schedule_id: str):
+        with store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            item = conn.execute("SELECT gmail_send_pending FROM outreach WHERE id=?", (item_id,)).fetchone()
+            if not item:
+                fail("Conversation not found.", 404)
+            if item["gmail_send_pending"]:
+                fail("Check Gmail Sent before changing this conversation.", 409)
+            deleted = conn.execute("DELETE FROM gmail_initial_schedule WHERE id=? AND outreach_id=?", (schedule_id, item_id))
+            if not deleted.rowcount:
+                fail("This schedule changed. Reopen the conversation to review it.", 409)
+        return store.outreach(item_id)
 
     @app.post("/api/outreach/{item_id}/gmail/follow-up-schedule")
     async def schedule_follow_up(item_id: int, data: GmailSchedule):
@@ -799,7 +885,7 @@ def create_app(db_path=None, seed=True):
     async def send_gmail(item_id: int, data: GmailSend):
         return await deliver_gmail(item_id, data)
 
-    async def deliver_gmail(item_id: int, data: GmailSend, schedule=None):
+    async def deliver_gmail(item_id: int, data: GmailSend, schedule=None, initial_schedule=None):
         text = data.text.strip() or fail("Enter a message.")
         follow_up = schedule is not None or data.expected_due_at is not None
         automatic = data.auto_follow_up
@@ -817,6 +903,18 @@ def create_app(db_path=None, seed=True):
             thread_id = item["thread_id"] if follow_up else None
             if schedule is None and item["schedule_id"]:
                 fail("Cancel the scheduled follow-up before sending manually.", 409)
+            if initial_schedule is None and item["initial_schedule_id"]:
+                fail("Cancel the scheduled request before sending manually.", 409)
+            if initial_schedule is not None and (
+                    item["initial_schedule_id"] != initial_schedule["id"] or item["initial_scheduled_issue"]
+                    or item["initial_scheduled_send_at"] != initial_schedule["send_at"]
+                    or item["initial_scheduled_send_at"] > now() or item["initial_scheduled_message"] != text
+                    or item["initial_scheduled_account"] != data.account or item["initial_scheduled_recipient"] != data.recipient
+                    or item["initial_scheduled_job_title"] != item["job_title"] or item["initial_scheduled_job_url"] != item["job_url"]
+                    or item["job_archived"] or item["job_source_status"] == "failed" or item["draft"] != text
+                    or item["initial_scheduled_auto_text"] != automatic_text
+                    or item["initial_scheduled_auto_days"] != (automatic.days if automatic else 0)):
+                fail("The scheduled request, job, or recipient changed. Cancel and review it before rescheduling.", 409)
             if schedule is not None and (item["schedule_id"] != schedule["id"] or item["scheduled_issue"]
                                          or thread_id != schedule["thread_id"]):
                 fail("The scheduled Gmail conversation changed.", 409)
@@ -863,15 +961,28 @@ def create_app(db_path=None, seed=True):
             with store.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 current = conn.execute(OUTREACH_SELECT + " WHERE o.id=?", (item_id,)).fetchone()
-                if any(current[key] != item[key] for key in ("state", "gmail_send_pending", "due_at", "email",
+                if not current or any(current[key] != item[key] for key in ("state", "gmail_send_pending", "due_at", "email",
                                                              "thread_id", "mail_peer", "mail_account", "schedule_id",
-                                                             "scheduled_issue", draft_field)):
+                                                             "scheduled_issue", "initial_schedule_id", "initial_scheduled_send_at",
+                                                             "initial_scheduled_message", "initial_scheduled_issue", "initial_scheduled_account",
+                                                             "initial_scheduled_recipient", "initial_scheduled_job_title", "initial_scheduled_job_url",
+                                                             "initial_scheduled_auto_text", "initial_scheduled_auto_days", "job_archived",
+                                                             "job_title", "job_url", "job_source_status", draft_field)):
                     fail("This conversation changed. Reopen it before sending.", 409)
                 if schedule is not None and (store.setting("gmail_account") != account
                                              or store.setting("gmail_send_enabled") != "1"):
                     fail("Reconnect Gmail and schedule the follow-up again.", 409)
                 if automatic and (store.setting("gmail_account") != account or store.setting("gmail_send_enabled") != "1"):
                     fail("Reconnect Gmail before scheduling a follow-up.", 409)
+                if initial_schedule:
+                    if store.setting("gmail_account") != account or store.setting("gmail_send_enabled") != "1":
+                        fail("Reconnect Gmail and schedule the request again.", 409)
+                    previous = conn.execute("""SELECT 1 FROM outreach o JOIN contacts c ON c.id=o.contact_id
+                        WHERE o.id<>? AND o.sent_at IS NOT NULL AND o.state IN ('waiting','replied','offered')
+                        AND (o.contact_id=? OR lower(c.email)=lower(?) OR lower(o.mail_peer)=lower(?)) LIMIT 1""",
+                        (item_id, item["contact_id"], recipient, recipient)).fetchone()
+                    if previous:
+                        fail("This person has an active conversation. Review it before sending another request.", 409)
                 conn.execute(f"UPDATE outreach SET gmail_send_pending=?,{draft_field}=? WHERE id=?", (stamp, text, item_id))
                 if automatic:
                     conn.execute("UPDATE outreach SET follow_up_draft=? WHERE id=?", (automatic_text, item_id))
@@ -907,13 +1018,16 @@ def create_app(db_path=None, seed=True):
                         mail_anchor=?,mail_peer=?,gmail_send_pending='',gmail_sent=1 WHERE id=?""",
                         (now(), due, delivered_thread, account, int(started.timestamp() * 1000) - 1,
                          recipient.lower(), item_id))
+                    if initial_schedule:
+                        conn.execute("DELETE FROM gmail_initial_schedule WHERE id=? AND outreach_id=?", (initial_schedule["id"], item_id))
                     if automatic:
                         conn.execute("""INSERT INTO gmail_follow_up_schedule(id,outreach_id,send_at,message,account,recipient,thread_id)
                             VALUES(?,?,?,?,?,?,?)""", (uuid4().hex, item_id, due, automatic_text, account,
                                                       recipient.lower(), delivered_thread))
                 conn.execute("INSERT INTO events(outreach_id,kind,at,note,message) VALUES(?,?,?,?,?)",
                              (item_id, "followed_up" if follow_up else "sent", now(),
-                              "Scheduled follow-up sent via Gmail." if schedule else "Sent via Gmail.", text))
+                              "Scheduled follow-up sent via Gmail." if schedule else
+                              "Scheduled request sent via Gmail." if initial_schedule else "Sent via Gmail.", text))
             return store.outreach(item_id)
 
     @app.get("/oauth/google")
@@ -932,6 +1046,8 @@ def create_app(db_path=None, seed=True):
             account = store.setting("gmail_account")
             gmail.disconnect()
             store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE account=? AND issue=''",
+                        ("Gmail was disconnected. Reconnect, then cancel and schedule again.", account))
+            store.write("UPDATE gmail_initial_schedule SET issue=? WHERE account=? AND issue=''",
                         ("Gmail was disconnected. Reconnect, then cancel and schedule again.", account))
             store.set_setting("gmail_issue", "")
         return {"ok": True}

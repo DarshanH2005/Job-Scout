@@ -403,7 +403,7 @@ function handoffLinks(item) {
 function showConversation() {
   const i=S.item, waiting=i.state==="waiting";
   const {mail}=S.info, isGmail=i.channel==="gmail";
-  const sendRequest=isGmail&&mail.send_enabled&&i.email&&!i.gmail_send_pending;
+  const sendRequest=isGmail&&mail.send_enabled&&i.email&&!i.gmail_send_pending&&!i.initial_schedule_id;
   const sendFollowUp=isGmail&&mail.send_enabled&&i.thread_id&&i.mail_account===mail.account&&!i.gmail_send_pending&&!i.schedule_id;
   const resumeSchedule=isGmail&&mail.send_enabled&&mail.scheduling&&i.mail_account===mail.account&&!i.gmail_send_pending&&
     ["The contact sent an automatic or nonstandard reply. Review the thread before following up.","Another sender replied in the thread. Review it before following up."].includes(i.scheduled_issue);
@@ -420,14 +420,20 @@ function showConversation() {
         `<label>Recipient email<input name="email" type="email" maxlength="254" value="${E(i.email)}"></label>
           <span class="hint">Gmail opens with the recipient and subject. Copy your message here and paste it into Gmail before sending.</span>`}
         <div><button class="button small">Save contact handoff</button></div></form></details>`:""}
-    ${i.state==="draft"?`<form class="form" data-form="message" data-id="${i.id}"><label>Editable message<textarea id="draft-text" name="text" maxlength="4000" required>${E(i.draft)}</textarea></label>
+    ${i.state==="draft"?`<form class="form" data-form="message" data-id="${i.id}"><label>${i.initial_schedule_id?"Scheduled message":"Editable message"}<textarea id="draft-text" name="text" maxlength="4000" required ${i.initial_schedule_id?"readonly":""}>${E(i.draft)}</textarea></label>
+    ${i.initial_schedule_id?`<p class="hint">${i.initial_scheduled_issue||i.gmail_send_pending?"Scheduled request needs review":`Scheduled for ${date(i.initial_scheduled_send_at,true)}`} · To ${E(i.initial_scheduled_recipient)}</p>
+      ${i.initial_scheduled_issue?`<p class="evidence">${E(i.initial_scheduled_issue)}</p>`:""}
+      ${i.initial_scheduled_auto_days?`<p class="hint">A follow-up is planned ${num(i.initial_scheduled_auto_days)} days after a confirmed send, if there is no reply.</p>`:""}`:""}
     ${sendRequest?`<p class="hint">From ${E(mail.account)} to ${E(i.email)}<br>Subject: ${E(`Referral request for ${i.job_title}`)}</p>`:""}
     ${sendRequest&&mail.scheduling?`<details class="section"><summary>Optional automatic follow-up</summary>
       <label class="checklabel"><input type="checkbox" id="auto-follow-up"> Schedule this follow-up when I send</label>
       <label>Follow-up message<textarea id="auto-follow-up-text" maxlength="4000">${E(i.follow_up_draft||followUpText(i))}</textarea></label>
       <label>Send after<select id="auto-follow-up-days">${select({"3":"3 calendar days","5":"5 calendar days","7":"7 calendar days","14":"14 calendar days"},"5")}</select></label>
       <p class="hint">Job Scout checks the thread for a reply first. If the app is closed, it checks and sends when reopened.</p></details>`:""}
-    <div class="actions">${sendRequest?B("Send via Gmail","gmail-send",i.id,"primary"):""}${B("Copy message","copy-message","",sendRequest?"":"primary")}<button class="button">Save edits</button>${S.info.rewrite_configured?B("AI rewrite","rewrite"):""}</div></form>`:
+    <div class="actions">${sendRequest?B("Send via Gmail","gmail-send",i.id,"primary"):""}${B("Copy message","copy-message","",sendRequest?"":"primary")}${i.initial_schedule_id?(!i.gmail_send_pending?B("Cancel scheduled request","gmail-cancel-initial",i.id,"small"):""):'<button class="button">Save edits</button>'}${S.info.rewrite_configured&&!i.initial_schedule_id?B("AI rewrite","rewrite"):""}</div>
+    ${sendRequest&&mail.scheduling?`<details class="section"><summary>Schedule this request</summary><label>Send date and time<input type="datetime-local" id="initial-send-at"></label>
+      <p class="hint">The app sends the reviewed text while it is open, or after it next opens. It pauses if the recipient, job, or an existing conversation changes.</p>
+      ${B("Schedule request","gmail-schedule-initial",i.id,"small")}</details>`:""}</form>`:
     `<details><summary>Original request</summary><div class="description">${E(original)}</div></details>`}
     ${waiting?`<section class="section"><p class="eyebrow">FOLLOW-UP</p>
     <form class="form" data-form="follow-up" data-id="${i.id}">
@@ -528,6 +534,22 @@ async function changeGmailSchedule(id,cancel=false) {
   if(S.page==="outreach") await render();
   notice(cancel?"Scheduled follow-up canceled.":"Gmail follow-up scheduled.");
 }
+async function changeInitialSchedule(id,cancel=false) {
+  const title=$("#dialog-title"),item=S.item;
+  const path=`/outreach/${id}/gmail/initial-schedule`;
+  let updated;
+  if(cancel) updated=await api(`${path}/${encodeURIComponent(item.initial_schedule_id)}`,"DELETE");
+  else {
+    const sendAt=new Date($("#initial-send-at").value);
+    if(!Number.isFinite(sendAt.getTime())||sendAt<=new Date()) throw new Error("Choose a date and time in the future.");
+    const data={text:$("#draft-text").value,account:S.info.mail.account,recipient:item.email,send_at:sendAt.toISOString()};
+    if($("#auto-follow-up")?.checked) data.auto_follow_up={text:$("#auto-follow-up-text").value,days:Number($("#auto-follow-up-days").value)};
+    updated=await api(path,"POST",data);
+  }
+  if(modal.open&&title.isConnected) {S.item=updated;showConversation();}
+  if(S.page==="outreach") await render();
+  notice(cancel?"Scheduled request canceled.":"Request scheduled; review it here any time.");
+}
 async function resumeGmailSchedule(id) {
   const title=$("#dialog-title"),item=S.item;
   let updated;
@@ -567,6 +589,7 @@ async function act(action,id) {
     "mail-connect":async()=>{location.href=(await api("/gmail/authorize","POST")).url;},
     "mail-connect-send":async()=>{location.href=(await api("/gmail/authorize","POST",{send:true})).url;},
     "gmail-send":()=>sendGmail(id),"gmail-follow-up":()=>sendGmail(id,true),
+    "gmail-schedule-initial":()=>changeInitialSchedule(id),"gmail-cancel-initial":()=>changeInitialSchedule(id,true),
     "gmail-schedule":()=>changeGmailSchedule(id),"gmail-cancel-schedule":()=>changeGmailSchedule(id,true),
     "gmail-resume-schedule":()=>resumeGmailSchedule(id),
     "forget-brave":async()=>{await saveIntegration("brave","");},

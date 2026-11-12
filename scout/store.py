@@ -65,6 +65,12 @@ CREATE TABLE IF NOT EXISTS gmail_follow_up_schedule (
     thread_id TEXT NOT NULL, issue TEXT NOT NULL DEFAULT '', reviewed_message_ids TEXT NOT NULL DEFAULT '[]',
     review_pending_ids TEXT NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS gmail_initial_schedule (
+    id TEXT PRIMARY KEY, outreach_id INTEGER NOT NULL UNIQUE REFERENCES outreach(id),
+    send_at TEXT NOT NULL, message TEXT NOT NULL, account TEXT NOT NULL, recipient TEXT NOT NULL,
+    job_title TEXT NOT NULL, job_url TEXT NOT NULL, auto_text TEXT NOT NULL DEFAULT '',
+    auto_days INTEGER NOT NULL DEFAULT 0, issue TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS mail_seen (
     account TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL,
     at TEXT NOT NULL, subject TEXT NOT NULL DEFAULT '', dismissed INTEGER NOT NULL DEFAULT 0,
@@ -79,10 +85,16 @@ OUTREACH_SELECT = """
 SELECT o.*, c.name AS person, c.source, c.profile_url, c.email, j.title AS job_title, j.url AS job_url,
        j.applied_at, co.name AS company, f.id AS schedule_id, f.send_at AS scheduled_send_at,
        f.message AS scheduled_message, f.issue AS scheduled_issue, f.reviewed_message_ids AS scheduled_reviewed_message_ids,
-       f.review_pending_ids AS scheduled_review_pending_ids
+       f.review_pending_ids AS scheduled_review_pending_ids,
+       s.id AS initial_schedule_id, s.send_at AS initial_scheduled_send_at, s.message AS initial_scheduled_message,
+       s.account AS initial_scheduled_account, s.recipient AS initial_scheduled_recipient,
+       s.job_title AS initial_scheduled_job_title, s.job_url AS initial_scheduled_job_url,
+       s.auto_text AS initial_scheduled_auto_text, s.auto_days AS initial_scheduled_auto_days,
+       s.issue AS initial_scheduled_issue, j.archived AS job_archived, co.status AS job_source_status
 FROM outreach o JOIN contacts c ON c.id=o.contact_id JOIN jobs j ON j.id=o.job_id
 JOIN companies co ON co.id=j.company_id
 LEFT JOIN gmail_follow_up_schedule f ON f.outreach_id=o.id
+LEFT JOIN gmail_initial_schedule s ON s.outreach_id=o.id
 """
 
 

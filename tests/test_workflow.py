@@ -324,6 +324,153 @@ def test_scheduled_gmail_follow_up_checks_thread_and_sends_at_most_once(tmp_path
                 assert not recovered["gmail_send_pending"] and recovered["schedule_id"] is None
 
 
+@pytest.mark.parametrize("outcome", ["sent", "unconfirmed", "recipient_changed", "job_changed", "archived", "source_failed", "other_conversation"])
+def test_scheduled_initial_gmail_request_sends_once_or_pauses(tmp_path, monkeypatch, outcome):
+    from datetime import datetime, timedelta, timezone
+
+    db = tmp_path / "scheduled-initial.sqlite3"
+    store = Store(db)
+    attempts = []
+    monkeypatch.setattr(app_module, "GMAIL_SCHEDULE_INTERVAL", .01)
+    async def token(self, send=False):
+        return "me@example.com", "fake-token"
+    async def send(token, message, thread_id):
+        attempts.append((message["To"], message.get_content().strip(), thread_id))
+        if outcome == "unconfirmed":
+            raise httpx.ReadTimeout("delivery not confirmed")
+        return {"id":"initial-message", "threadId":"initial-thread"}
+    monkeypatch.setattr(Gmail, "token", token)
+    monkeypatch.setattr(Gmail, "send_message", staticmethod(send))
+    with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765") as client:
+        store.set_setting("gmail_account", "me@example.com")
+        store.set_setting("gmail_send_enabled", "1")
+        job = saved_job(client)
+        item = create_draft(client, job, "gmail")
+        path = f"/api/outreach/{item['id']}"
+        result(client.patch(path + "/contact-handoff", json={"email":"jane@example.com"}))
+        route = path + "/gmail/initial-schedule"
+        payload = {"text":"The request I reviewed.", "account":"me@example.com", "recipient":"jane@example.com",
+                   "send_at":(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                   "auto_follow_up":{"text":"A reviewed follow-up.", "days":5}}
+        result(client.post(route, json={**payload,"recipient":"other@example.com"}), 409)
+        scheduled = result(client.post(route, json=payload))
+        assert scheduled["initial_schedule_id"] and scheduled["initial_scheduled_auto_days"] == 5
+        result(client.post(path + "/gmail/send", json={k:v for k,v in payload.items() if k != "send_at"}), 409)
+        result(client.patch(path, json={"text":"Changed text"}), 409)
+        if outcome == "recipient_changed":
+            result(client.patch(path + "/contact-handoff", json={"email":"other@example.com"}))
+        elif outcome == "job_changed":
+            store.write("UPDATE jobs SET title='Changed role' WHERE id=?", (job["id"],))
+        elif outcome == "archived":
+            store.write("UPDATE jobs SET archived=1 WHERE id=?", (job["id"],))
+        elif outcome == "source_failed":
+            store.write("UPDATE companies SET status='failed' WHERE id=?", (job["company_id"],))
+        elif outcome == "other_conversation":
+            other = result(client.post("/api/jobs", json={"company":"Sample Company", "title":"Another role",
+                           "url":"https://sample.example/jobs/other"}), 201)
+            action(client, create_draft(client, other), "sent")
+        store.write("UPDATE gmail_initial_schedule SET send_at='2000-01-01T00:00:00Z' WHERE id=?", (scheduled["initial_schedule_id"],))
+        for _ in range(150):
+            updated = result(client.get(path))
+            if not updated["initial_schedule_id"] or updated["initial_scheduled_issue"]:
+                break
+            time.sleep(.01)
+        else:
+            pytest.fail("The scheduled request did not finish or pause.")
+        if outcome == "sent":
+            assert attempts == [("jane@example.com", "The request I reviewed.", None)]
+            assert updated["state"] == "waiting" and updated["initial_schedule_id"] is None
+            assert updated["schedule_id"] and updated["scheduled_message"] == "A reviewed follow-up."
+            assert updated["events"][0]["message"] == "The request I reviewed."
+        elif outcome == "unconfirmed":
+            assert len(attempts) == 1 and updated["gmail_send_pending"] and updated["initial_scheduled_issue"]
+            result(client.delete(route + "/" + scheduled["initial_schedule_id"]), 409)
+        else:
+            assert attempts == [] and updated["state"] == "draft" and updated["initial_scheduled_issue"]
+            result(client.delete(route + "/" + scheduled["initial_schedule_id"]))
+        time.sleep(.05)
+        assert len(attempts) <= 1
+
+
+def test_initial_schedule_survives_restart_and_is_sent_once(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    db = tmp_path / "restart-initial.sqlite3"
+    store = Store(db)
+    attempts = []
+    monkeypatch.setattr(app_module, "GMAIL_SCHEDULE_INTERVAL", .01)
+    async def token(self, send=False):
+        return "me@example.com", "fake-token"
+    async def send(token, message, thread_id):
+        attempts.append(message.get_content().strip())
+        return {"id":"message", "threadId":"thread"}
+    monkeypatch.setattr(Gmail, "token", token)
+    monkeypatch.setattr(Gmail, "send_message", staticmethod(send))
+    with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765") as client:
+        store.set_setting("gmail_account", "me@example.com")
+        store.set_setting("gmail_send_enabled", "1")
+        item = create_draft(client, saved_job(client), "gmail")
+        path = f"/api/outreach/{item['id']}"
+        result(client.patch(path + "/contact-handoff", json={"email":"jane@example.com"}))
+        scheduled = result(client.post(path + "/gmail/initial-schedule", json={"text":"Reviewed request.",
+            "account":"me@example.com", "recipient":"jane@example.com",
+            "send_at":(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}))
+    assert attempts == []
+    store.write("UPDATE gmail_initial_schedule SET send_at='2000-01-01T00:00:00Z' WHERE id=?", (scheduled["initial_schedule_id"],))
+    with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765") as client:
+        for _ in range(150):
+            updated = result(client.get(path))
+            if updated["state"] == "waiting":
+                break
+            time.sleep(.01)
+        assert updated["initial_schedule_id"] is None and attempts == ["Reviewed request."]
+    with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765"):
+        time.sleep(.05)
+    assert attempts == ["Reviewed request."]
+
+
+def test_initial_schedule_cancel_and_record_as_sent_are_safe(desk):
+    from datetime import datetime, timedelta, timezone
+    client, store = desk
+    store.set_setting("gmail_account", "me@example.com")
+    store.set_setting("gmail_send_enabled", "1")
+    job = saved_job(client)
+    item = create_draft(client, job, "gmail")
+    path = f"/api/outreach/{item['id']}"
+    result(client.patch(path + "/contact-handoff", json={"email":"jane@example.com"}))
+    route = path + "/gmail/initial-schedule"
+    payload = {"text":"A reviewed request.", "account":"me@example.com", "recipient":"jane@example.com",
+               "send_at":(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}
+    scheduled = result(client.post(route, json=payload))
+    result(client.delete(route + "/wrong-id"), 409)
+    canceled = result(client.delete(route + "/" + scheduled["initial_schedule_id"]))
+    assert canceled["initial_schedule_id"] is None
+    result(client.patch(path, json={"text":"Edited after cancellation."}))
+    scheduled = result(client.post(route, json=payload))
+    recorded = action(client, scheduled, "sent")
+    assert recorded["state"] == "waiting" and recorded["initial_schedule_id"] is None
+    assert store.one("SELECT count(*) AS count FROM gmail_initial_schedule")["count"] == 0
+
+
+def test_initial_schedule_detects_active_conversation_by_email(desk):
+    from datetime import datetime, timedelta, timezone
+    client, store = desk
+    store.set_setting("gmail_account", "me@example.com")
+    store.set_setting("gmail_send_enabled", "1")
+    prior = create_draft(client, saved_job(client), "gmail")
+    prior_path = f"/api/outreach/{prior['id']}"
+    result(client.patch(prior_path + "/contact-handoff", json={"email":"Jane@Example.com"}))
+    action(client, prior, "sent")
+    job = result(client.post("/api/jobs", json={"company":"Other Company", "title":"Software Engineer",
+                 "url":"https://other.example/job"}), 201)
+    draft = result(client.post(f"/api/jobs/{job['id']}/draft", json={"contact":{"name":"Jane Different"},
+                   "channel":"gmail"}), 201)
+    path = f"/api/outreach/{draft['id']}"
+    result(client.patch(path + "/contact-handoff", json={"email":"jane@example.com"}))
+    payload = {"text":"A request", "account":"me@example.com", "recipient":"jane@example.com",
+               "send_at":(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}
+    assert "active conversation" in result(client.post(path + "/gmail/initial-schedule", json=payload), 409)["detail"]
+
+
 def test_gmail_sending_scope_is_opt_in(desk, monkeypatch):
     from urllib.parse import parse_qs, urlsplit
 
