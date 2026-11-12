@@ -40,7 +40,9 @@ ROLE_AREAS = {
 
 def search_terms(job):
     title = job["title"].lower()
-    if re.search(r"\b(data|analytics)\b", title):
+    if re.search(r"\bdata scien(?:ce|tist)\b", title):
+        specialty = "data science"
+    elif re.search(r"\b(data|analytics)\b", title):
         specialty = "data engineering"
     elif re.search(r"\b(ai|ml|machine learning|research)\b", title):
         specialty = "machine learning"

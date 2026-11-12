@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import scout.app as app_module
 from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, graduation_warning, normalize, work_authorization_evidence
 from scout.gmail import Gmail, SEND_SCOPE, SCOPE, incoming_reply
-from scout.research import ResearchCache, abnormal_engineers, affirm_authors, cloudflare_authors, datadog_speakers, public_candidates, rank_candidates, stripe_authors
+from scout.research import ResearchCache, abnormal_engineers, affirm_authors, cloudflare_authors, datadog_speakers, public_candidates, rank_candidates, search_terms, stripe_authors
 from scout.store import Store
 
 
@@ -591,6 +591,11 @@ def test_abnormal_stories_require_recent_named_engineering_interview(monkeypatch
     assert month in people[0]["reason"] and "Verify" in people[0]["reason"]
     assert "backend" in people[0]["notes"]
     assert fetched.count("/careers/stories/alex-example") == 1
+
+
+def test_data_scientist_research_uses_the_right_specialty():
+    assert search_terms({"company":"Mastercard", "title":"Data Scientist I"}) == ('"Mastercard" "data science"', "data science")
+    assert search_terms({"company":"Mastercard", "title":"Data Engineer II"})[1] == "data engineering"
 
 
 def test_contact_ranking_explains_related_area_without_claiming_same_team():
