@@ -53,7 +53,7 @@ ROLE = re.compile(
     r"software developer|developer|data scientist|data analyst|mlops|sde|swe|sre|research engineer)\b", re.I
 )
 EARLY = re.compile(r"\b(intern(?:ship)?|new grad(?:uate)?|early career|university grad(?:uate)?|entry[ -]level|junior|associate|graduate|apprentice|level 1|engineer (?:i|1)|sde[- ]?1)\b", re.I)
-SENIOR = re.compile(r"\b(senior|sr\.?|intermediate|mid[ -]level|staff|principal|manager|director|head|lead|architect|distinguished|vp|engineer (?:iii|iv|v|[3-5])|sde[- ]?[345])\b", re.I)
+SENIOR = re.compile(r"\b(senior|sr\.?|intermediate|mid[ -]level|staff|principal|manager|mgr\.?|director|head|lead|architect|distinguished|vp|smts|lmts|pmts|engineer (?:iii|iv|v|[3-5])|sde[- ]?[345])\b", re.I)
 EARLY_SCORE = 90
 YEARS = re.compile(
     r"(?<![\d.])\b(?P<minimum>\d{1,2})\s*(?:(?:[-–]|to)\s*\d{1,2}|\+|or more)?\s*years?\s+"
@@ -410,9 +410,12 @@ async def fetch_board(client, company, limit):
                         raise ValueError("Workday returned a posting without a title.")
                     remote = "Remote" if str(row.get("remoteType", "")).casefold() == "remote" else ""
                     jobs.append(build_job(path, title, "", row.get("locationsText"), remote, "", public_base + path))
-                # Resolve a bounded set of early-career listings whose location is only a count.
-                candidates = [i for i, job in enumerate(jobs) if job["score"] >= EARLY_SCORE
-                              and re.fullmatch(r"\d+\s+locations?", job["location"], re.I)][:20]
+                # Resolve ambiguous early-career locations first, then relevant India listings.
+                ambiguous = [i for i, job in enumerate(jobs) if job["score"] >= EARLY_SCORE
+                             and re.fullmatch(r"\d+\s+locations?", job["location"], re.I)]
+                india = [i for i, job in enumerate(jobs) if job["score"] > 0
+                         and job["region"] in {"india", "india_remote"}]
+                candidates = list(dict.fromkeys(ambiguous + india))[:20]
                 detail_limit = asyncio.Semaphore(2)
 
                 async def enrich(index):

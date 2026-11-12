@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import scout.app as app_module
 from scout.feeds import build_job, eligibility_evidence, fetch_board, geography, graduation_warning, normalize, work_authorization_evidence
 from scout.gmail import Gmail, SEND_SCOPE, SCOPE, incoming_reply
-from scout.research import ResearchCache, affirm_authors, cloudflare_authors, datadog_speakers, public_candidates, rank_candidates, stripe_authors
+from scout.research import ResearchCache, abnormal_engineers, affirm_authors, cloudflare_authors, datadog_speakers, public_candidates, rank_candidates, stripe_authors
 from scout.store import Store
 
 
@@ -557,6 +557,42 @@ def test_affirm_feed_requires_recent_named_technical_byline_and_official_source(
     assert "Verify their current role" in people[0]["reason"]
 
 
+def test_abnormal_stories_require_recent_named_engineering_interview(monkeypatch):
+    from datetime import date
+
+    month = date.today().strftime("%B %Y")
+    def story(name, section, published, body):
+        return (f"<title>Meet {name} | Abnormal AI</title><p>{section} · {published}</p>"
+                f"<h1>Meet {name}</h1><p>{body}</p>")
+    pages = {
+        "/careers/stories": '<a href="/careers/stories/alex-example">Alex</a>'
+                             '<a href="https://evil.example/careers/stories/fake">External</a>',
+        "/sitemap.xml": '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + ''.join(
+            f'<url><loc>https://abnormal.ai/careers/stories/{slug}</loc></url>'
+            for slug in ['alex-example', 'old-person', 'marketing-person', 'unrelated-person']) + '</urlset>',
+        "/careers/stories/alex-example": story("Alex Example", "Engineering", month,
+                                                "I am a software engineer working on backend systems in Bangalore."),
+        "/careers/stories/old-person": story("Blair Example", "Engineering", "January 2020", "I am a software engineer."),
+        "/careers/stories/marketing-person": story("Casey Example", "Marketing", month, "I am a software engineer."),
+        "/careers/stories/unrelated-person": story("Dana Example", "Engineering", month, "Our software engineer works on backend systems."),
+    }
+    fetched = []
+    def respond(request):
+        assert request.url.host == "abnormal.ai"
+        fetched.append(request.url.path)
+        return httpx.Response(200, text=pages[request.url.path])
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr("scout.research.httpx.AsyncClient",
+                        lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    people = asyncio.run(abnormal_engineers())
+    assert [person["name"] for person in people] == ["Alex Example"]
+    assert people[0]["source"] == "https://abnormal.ai/careers/stories/alex-example"
+    assert month in people[0]["reason"] and "Verify" in people[0]["reason"]
+    assert "backend" in people[0]["notes"]
+    assert fetched.count("/careers/stories/alex-example") == 1
+
+
 def test_contact_ranking_explains_related_area_without_claiming_same_team():
     job = {"title": "Software Engineer - Kubernetes platform", "department": ""}
     candidates = [
@@ -616,6 +652,27 @@ def test_people_endpoint_reuses_official_authors_per_company(desk, monkeypatch):
     second = result(client.get(path))
     assert second["official_cached"] is True and second["people"][0]["name"] == "Alex Example"
     assert len(calls) == 1
+
+
+def test_abnormal_people_works_without_paid_search_key(desk, monkeypatch):
+    client, _ = desk
+    calls = []
+
+    async def stories():
+        calls.append(True)
+        return [{"name": "Alex Example", "title": "Engineering career story",
+                 "source": "https://abnormal.ai/careers/stories/alex-example",
+                 "notes": "Backend engineer", "reason": "Dated employer interview."}]
+
+    monkeypatch.setattr("scout.research.abnormal_engineers", stories)
+    monkeypatch.setattr("scout.research.brave_key", lambda: "")
+    job = result(client.post("/api/jobs", json={"company": "Abnormal AI", "title": "Software Engineer - Backend",
+                         "url": "https://example.com/abnormal-role"}), 201)
+    path = f"/api/jobs/{job['id']}/people"
+    first, second = result(client.get(path)), result(client.get(path))
+    assert first["status"] == "official" and first["people"][0]["name"] == "Alex Example"
+    assert "backend" in first["people"][0]["reason"] and "team is unconfirmed" in first["people"][0]["reason"]
+    assert second["official_cached"] is True and len(calls) == 1
 
 
 def test_expired_gmail_authorization_surfaces_reconnect_in_settings(desk, monkeypatch):
@@ -923,7 +980,10 @@ def test_workday_requires_complete_stable_snapshot(case):
     paths = ["/job/India-Bangalore/Junior-Software-Engineer_R1", "/job/US/Software-Engineer_R2"]
 
     def respond(request):
-        assert request.method == "POST" and request.url.host == "sample.wd5.myworkdayjobs.com"
+        assert request.url.host == "sample.wd5.myworkdayjobs.com"
+        if request.method == "GET":
+            return httpx.Response(404)
+        assert request.method == "POST"
         offset = json.loads(request.content)["offset"]
         calls.append(offset)
         total = 2000 if case == "capped" else 3 if case == "shifting" and offset else 0 if case == "zero_total" and offset else 2
@@ -1041,6 +1101,27 @@ def test_workday_location_enrichment_is_bounded():
     assert sum(job["region"] == "unclear" for job in jobs) == 1
 
 
+@pytest.mark.parametrize(("description", "expected_score"), [
+    ("<p>5+ years of experience as a software engineer.</p>", 0),
+    ("<h2>Preferred qualifications</h2><p>5+ years of experience.</p>", 55),
+    ("<p>1+ years of experience as a software engineer.</p>", 55),
+])
+def test_workday_scan_checks_requirements_for_india_roles(description, expected_score):
+    path = "/job/India-Bangalore/Software-Engineer_R1"
+    public = "https://sample.wd5.myworkdayjobs.com/External" + path
+    def respond(request):
+        if request.method == "POST":
+            return httpx.Response(200, json={"total":1, "jobPostings":[
+                {"title":"Software Engineer", "externalPath":path, "locationsText":"Bangalore, India"}]})
+        return httpx.Response(200, json={"jobPostingInfo":{"externalUrl":public,
+                              "location":"Bangalore, India", "jobDescription":description}})
+    async def read():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await fetch_board(client, {"provider":"workday", "board":"sample.wd5.External"}, asyncio.Semaphore(1))
+    jobs, error = asyncio.run(read())
+    assert not error and jobs[0]["score"] == expected_score and jobs[0]["description"]
+
+
 def test_workday_source_migration_preserves_customized_company(tmp_path):
     store = Store(tmp_path / "migration.sqlite3")
     store.initialize(seed=True)
@@ -1085,6 +1166,22 @@ def test_early_title_with_experience_requirement_is_not_ranked_as_new_grad():
     assert preferred["score"] == 90
     capped = build_job("3", "Software Engineer 1", "", "India", "", "Up to 2 years of experience.", "https://example.com/3")
     assert capped["score"] == 90
+
+
+def test_senior_title_abbreviations_are_not_new_grad_matches(desk):
+    for title in ("Mgr, Software Development", "Data Engineering SMTS/LMTS", "Software Engineering PMTS"):
+        assert build_job("1", title, "", "India", "", "", "https://example.com/1")["score"] == 0
+    assert build_job("2", "Software Engineer AMTS", "", "India", "", "", "https://example.com/2")["score"] == 55
+
+    client, store = desk
+    job = result(client.post("/api/jobs", json={"company":"Example", "title":"Software Engineering PMTS",
+                 "url":"https://example.com/saved-senior"}), 201)
+    result(client.patch(f"/api/jobs/{job['id']}", json={"saved":True}))
+    store.write("UPDATE jobs SET score=55,reason='Old score' WHERE id=?", (job["id"],))
+    store.write("DELETE FROM settings WHERE key='senior_title_filter_1'")
+    store.initialize(seed=False)
+    refreshed = result(client.get(f"/api/jobs/{job['id']}"))
+    assert refreshed["score"] == 0 and refreshed["saved"]
 
 
 def test_experience_ranking_respects_preferred_and_all_required_evidence(desk):

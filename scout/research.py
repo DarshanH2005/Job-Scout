@@ -25,6 +25,8 @@ STRIPE_ENGINEERING = "https://stripe.dev/blog/topic/engineering"
 CLOUDFLARE_BLOG = "https://blog.cloudflare.com/"
 DATADOG_SPEAKERS = "https://dash.datadoghq.com/sessions/speakers/"
 AFFIRM_FEED = "https://tech.affirm.com/feed"
+ABNORMAL_STORIES = "https://abnormal.ai/careers/stories"
+ABNORMAL_SITEMAP = "https://abnormal.ai/sitemap.xml"
 OFFICIAL_CACHE_SECONDS = 15 * 60
 ROLE_AREAS = {
     "infrastructure": re.compile(r"\b(?:infrastructure|platform|systems?|kubernetes|cloud|devops|sre)\b", re.I),
@@ -256,10 +258,76 @@ async def affirm_authors():
     return first_by_team + remaining
 
 
+async def abnormal_engineers():
+    """Find recent named engineering interviews on Abnormal AI's own site."""
+    class StoryLinks(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.paths = []
+
+        def handle_starttag(self, tag, attrs):
+            path = dict(attrs).get("href", "")
+            if tag == "a" and re.fullmatch(r"/careers/stories/[a-z0-9-]+/?", path) and path not in self.paths:
+                self.paths.append(path)
+
+    async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+        urls = []
+        try:
+            response = await client.get(ABNORMAL_STORIES)
+            response.raise_for_status()
+            parser = StoryLinks()
+            parser.feed(response.text)
+            urls.extend("https://abnormal.ai" + path for path in parser.paths[:8])
+        except httpx.HTTPError:
+            pass
+        try:
+            response = await client.get(ABNORMAL_SITEMAP)
+            response.raise_for_status()
+            root = ElementTree.fromstring(response.content)
+            paths = [node.text for node in root.iter() if node.tag.endswith("}loc") and node.text
+                     and re.fullmatch(r"https://abnormal\.ai/careers/stories/[a-z0-9-]+/?", node.text)]
+            for index in range(min(5, len(paths))):
+                urls.extend((paths[index], paths[-index - 1]))
+        except (httpx.HTTPError, ElementTree.ParseError):
+            pass
+        urls = list(dict.fromkeys(urls))[:18]
+        limit = asyncio.Semaphore(3)
+
+        async def story(url):
+            async with limit:
+                try:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    lines = clean(response.text).splitlines()
+                    if not lines or not re.fullmatch(r"Meet .+ \| Abnormal AI", lines[0]):
+                        return None
+                    name = lines[0][5:-len(" | Abnormal AI")].strip()
+                    if not re.fullmatch(r"[A-Z][\w.'’\-]*(?:\s+[A-Z][\w.'’\-]*){1,3}", name):
+                        return None
+                    heading = next((i for i, line in enumerate(lines) if line == f"Meet {name}"), None)
+                    if not heading or not re.fullmatch(r"Engineering\s*·\s*[A-Za-z]+\s+20\d{2}", lines[heading - 1]):
+                        return None
+                    published = datetime.strptime(lines[heading - 1].split("·")[1].strip(), "%B %Y").date()
+                    if not date.today() - timedelta(days=730) <= published <= date.today():
+                        return None
+                    body = lines[heading + 1:heading + 18]
+                    role = next((line for line in body if re.search(
+                        r"\b(?:software|platform|backend|security|lead|systems?|data)\s+engineer\b|\bengineering manager\b", line, re.I)
+                        and (name.casefold() in line.casefold() or re.search(r"\bI\s+(?:am|joined|work)\b", line, re.I))), None)
+                    if not role:
+                        return None
+                    notes = " ".join(dict.fromkeys([body[0][:170], role[:180]]))[:350] if body else ""
+                    return dict(name=name, title="Engineering career story", source=url, notes=notes,
+                                reason=f"Abnormal AI published this engineering interview in {published:%B %Y}. Verify current employment and location.")
+                except (httpx.HTTPError, ValueError, TypeError, IndexError):
+                    return None
+        return [person for person in await asyncio.gather(*(story(url) for url in urls)) if person]
+
+
 class ResearchCache:
     def __init__(self):
         self.entries = {}
-        self.locks = {company: asyncio.Lock() for company in ("stripe", "cloudflare", "datadog", "affirm")}
+        self.locks = {company: asyncio.Lock() for company in ("stripe", "cloudflare", "datadog", "affirm", "abnormal ai")}
 
     async def authors(self, company, search):
         async with self.locks[company]:
@@ -303,7 +371,7 @@ async def find_people(store, job, cache=None):
         else:
             status = "needs_key"
     official_sources = {"stripe": stripe_authors, "cloudflare": cloudflare_authors,
-                        "datadog": datadog_speakers, "affirm": affirm_authors}
+                        "datadog": datadog_speakers, "affirm": affirm_authors, "abnormal ai": abnormal_engineers}
     company = job["company"].casefold()
     official_search = official_sources.get(company)
     official_cached = False

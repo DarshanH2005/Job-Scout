@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .feeds import EARLY_SCORE, assess, eligibility_evidence, graduation_warning, required_timezone, work_authorization_evidence
+from .feeds import EARLY_SCORE, SENIOR, assess, eligibility_evidence, graduation_warning, required_timezone, work_authorization_evidence
 
 DATA = Path(__file__).with_name("companies.csv")
 EXPANDED_SOURCES = ("Databricks", "HP", "ServiceNow", "Snowflake", "Zscaler")
@@ -157,6 +157,12 @@ class Store:
                     if (row["score"] == 0 and score > 0) or (row["score"] == EARLY_SCORE and 0 < score < EARLY_SCORE):
                         conn.execute("UPDATE jobs SET score=?,reason=? WHERE id=?", (score, reason, row["id"]))
                 conn.execute("INSERT INTO settings VALUES('experience_ranking_2','1')")
+            if not conn.execute("SELECT 1 FROM settings WHERE key='senior_title_filter_1'").fetchone():
+                rows = conn.execute("SELECT id,title FROM jobs WHERE score>0").fetchall()
+                for row in rows:
+                    if SENIOR.search(row["title"]):
+                        conn.execute("UPDATE jobs SET score=0,reason='' WHERE id=?", (row["id"],))
+                conn.execute("INSERT INTO settings VALUES('senior_title_filter_1','1')")
             if not conn.execute("SELECT 1 FROM settings WHERE key='timezone_evidence_1'").fetchone():
                 rows = conn.execute("SELECT id,evidence,description FROM jobs WHERE description<>''").fetchall()
                 for row in rows:
