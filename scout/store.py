@@ -1,12 +1,13 @@
 """SQLite persistence for a single local Job Scout workspace."""
 
 import csv
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .feeds import EARLY_SCORE, SENIOR, assess, eligibility_evidence, graduation_warning, required_timezone, work_authorization_evidence
+from .feeds import EARLY_SCORE, SENIOR, SENIOR_DESCRIPTION, assess, eligibility_evidence, graduation_warning, required_timezone, work_authorization_evidence
 
 DATA = Path(__file__).with_name("companies.csv")
 EXPANDED_SOURCES = ("Databricks", "HP", "ServiceNow", "Snowflake", "Zscaler")
@@ -193,6 +194,15 @@ class Store:
                     if score < row["score"]:
                         conn.execute("UPDATE jobs SET score=?,reason=? WHERE id=?", (score, reason, row["id"]))
                 conn.execute("INSERT INTO settings VALUES('experience_ranking_3','1')")
+            if not conn.execute("SELECT 1 FROM settings WHERE key='role_seniority_1'").fetchone():
+                rows = conn.execute("SELECT id,title,department,description,region,score FROM jobs WHERE score>0").fetchall()
+                for row in rows:
+                    is_entry_science = re.search(r"\b(?:scientist|analyst) (?:i|1)\b", row["title"], re.I)
+                    if SENIOR.search(row["title"]) or SENIOR_DESCRIPTION.search(row["description"]) or is_entry_science:
+                        score, reason = assess(row["title"], row["department"], row["description"], row["region"])
+                        if score != row["score"]:
+                            conn.execute("UPDATE jobs SET score=?,reason=? WHERE id=?", (score, reason, row["id"]))
+                conn.execute("INSERT INTO settings VALUES('role_seniority_1','1')")
             if not conn.execute("SELECT 1 FROM settings WHERE key='timezone_evidence_1'").fetchone():
                 rows = conn.execute("SELECT id,evidence,description FROM jobs WHERE description<>''").fetchall()
                 for row in rows:

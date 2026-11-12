@@ -1598,6 +1598,36 @@ def test_early_title_with_experience_requirement_is_not_ranked_as_new_grad():
     assert capped["score"] == 90
 
 
+def test_explicit_senior_description_and_entry_scientist_titles(desk):
+    senior = "We're looking for a Senior AI Engineer, Generative AI and ML Engineering."
+    lead = "We are seeking an experienced Technical Lead - APR Design Automation."
+    for description in (senior, lead):
+        job = build_job("1", "AI Engineer II", "", "India", "", description, "https://example.com/role")
+        assert job["score"] == 0 and "senior or lead" in job["reason"]
+    normal = "We are looking for a software engineer to work with a senior engineer."
+    assert build_job("2", "Software Engineer", "", "India", "", normal, "https://example.com/role")["score"] == 55
+    assert build_job("3", "Data Scientist I", "", "India", "", "Build models.", "https://example.com/role")["score"] == 90
+    assert build_job("4", "Data Analyst 1", "", "India", "", "Build reports.", "https://example.com/role")["score"] == 90
+    assert build_job("5", "Data Scientist I", "", "India", "", "2+ years of experience.", "https://example.com/role")["score"] == 55
+    assert build_job("6", "Data Scientist III", "", "India", "", "", "https://example.com/role")["score"] == 0
+
+    client, store = desk
+    senior_job = result(client.post("/api/jobs", json={"company":"Example", "title":"AI Engineer II",
+                        "url":"https://example.com/senior", "description":senior}), 201)
+    scientist = result(client.post("/api/jobs", json={"company":"Example", "title":"Data Scientist I",
+                       "url":"https://example.com/scientist", "description":"Build models."}), 201)
+    senior_scientist = result(client.post("/api/jobs", json={"company":"Example", "title":"Data Scientist III",
+                              "url":"https://example.com/scientist-iii"}), 201)
+    result(client.patch(f"/api/jobs/{senior_job['id']}", json={"saved":True}))
+    store.write("UPDATE jobs SET score=55,reason='Old score' WHERE id IN (?,?,?)", (senior_job["id"], scientist["id"], senior_scientist["id"]))
+    store.write("DELETE FROM settings WHERE key='role_seniority_1'")
+    store.initialize(seed=False)
+    updated = result(client.get(f"/api/jobs/{senior_job['id']}"))
+    assert updated["score"] == 0 and updated["saved"]
+    assert result(client.get(f"/api/jobs/{scientist['id']}"))["score"] == 90
+    assert result(client.get(f"/api/jobs/{senior_scientist['id']}"))["score"] == 0
+
+
 def test_senior_title_abbreviations_are_not_new_grad_matches(desk):
     for title in ("Mgr, Software Development", "Data Engineering SMTS/LMTS", "Software Engineering PMTS"):
         assert build_job("1", title, "", "India", "", "", "https://example.com/1")["score"] == 0
@@ -1916,6 +1946,9 @@ def test_job_detail_quotes_required_and_preferred_eligibility(desk):
         {"label": "Required", "text": minimum}, {"label": "Preferred", "text": preferred},
     ]
     assert eligibility_evidence("Our company has 20 years of experience.") == []
+    assert eligibility_evidence("Bachelor or Master's Degree in Computer Science or equivalent") == [
+        {"label":"From the posting", "text":"Bachelor or Master's Degree in Computer Science or equivalent"}]
+    assert eligibility_evidence("Bring a high degree of enthusiasm.") == []
     assert eligibility_evidence("Applications close on November 30, 2026.") == [
         {"label": "Application deadline", "text": "Applications close on November 30, 2026."},
     ]

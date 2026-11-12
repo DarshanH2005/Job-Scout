@@ -52,8 +52,13 @@ ROLE = re.compile(
     r"(?:engineer(?:ing)?|develop(?:er|ment)|scientist)\b|\b(?:"
     r"software developer|developer|data scientist|data analyst|mlops|sde|swe|sre|research engineer)\b", re.I
 )
-EARLY = re.compile(r"\b(intern(?:ship)?|new grad(?:uate)?|early career|university grad(?:uate)?|entry[ -]level|junior|associate|graduate|apprentice|level 1|engineer (?:i|1)|sde[- ]?1)\b", re.I)
-SENIOR = re.compile(r"\b(senior|sr\.?|intermediate|mid[ -]level|staff|principal|manager|mgr\.?|director|head|lead|architect|distinguished|vp|smts|lmts|pmts|engineer (?:iii|iv|v|[3-5])|sde[- ]?[345])\b", re.I)
+EARLY = re.compile(r"\b(intern(?:ship)?|new grad(?:uate)?|early career|university grad(?:uate)?|entry[ -]level|junior|associate|graduate|apprentice|level 1|(?:engineer|scientist|analyst) (?:i|1)|sde[- ]?1)\b", re.I)
+SENIOR = re.compile(r"\b(senior|sr\.?|intermediate|mid[ -]level|staff|principal|manager|mgr\.?|director|head|lead|architect|distinguished|vp|smts|lmts|pmts|(?:engineer|scientist|analyst) (?:iii|iv|v|[3-5])|sde[- ]?[345])\b", re.I)
+SENIOR_DESCRIPTION = re.compile(
+    r"\b(?:we(?:'|’)re|we are)\s+(?:looking for|seeking|hiring)\s+(?:an?\s+)?(?:experienced\s+)?"
+    r"(?:technical lead\b|(?:senior|sr\.?|staff|principal|lead|engineering manager|director)\b"
+    r"[^.!?\n]{0,90}?\b(?:engineer(?:ing)?|developer|scientist|analyst|manager|lead)\b)", re.I
+)
 EARLY_SCORE = 90
 YEARS = re.compile(
     r"(?<![\d.])\b(?P<minimum>\d{1,2})\s*(?:(?:[-–]|to)\s*\d{1,2}|\+|or more)?\s*years?\s+"
@@ -71,6 +76,7 @@ EDUCATION = re.compile(
     r"|\d+\s+years? of (?:university|college) education)\b", re.I
 )
 DEGREE = re.compile(r"\b(?:degree|graduat\w*)\b", re.I)
+ACADEMIC_DEGREE = re.compile(r"\b(?:bachelor(?:['’]s)?|master(?:['’]s)?|doctoral|ph\.?d\.?|b\.?tech|m\.?tech)\s+degree\b", re.I)
 GRAD_DATE = re.compile(r"\b(?:by|between|before|after|in|through|from|expected|class of)\b[^.!?;\n]{0,36}\b20\d{2}\b", re.I)
 GRAD_YEAR_MENTION = re.compile(r"\b(?:graduat\w*|class of)\b[^.!?;\n]{0,140}\b20\d{2}\b", re.I)
 MINIMUM_HEADING = re.compile(r"(?:minimum|basic|required) (?:requirements|qualifications|experience|skills)|requirements|required|must have(?: (?:skills|qualifications|requirements))?", re.I)
@@ -246,6 +252,8 @@ def assess(title, department, description, region):
             return 0, ""
     if SENIOR.search(title):
         return 0, ""
+    if SENIOR_DESCRIPTION.search(description):
+        return 0, "The posting describes a senior or lead position."
     experience = []
     for evidence in eligibility_evidence(description, limit=None):
         excerpt = evidence["text"]
@@ -298,7 +306,7 @@ def eligibility_evidence(description, limit=4):
                 evidence.append({"label": "Application deadline", "text": excerpt})
                 seen.add(excerpt)
             elif (YEARS.search(excerpt) or YEARS_IN_ROLE.search(excerpt) or experience_minima(excerpt)
-                    or EXPERIENCE_MONTHS.search(excerpt) or EDUCATION.search(excerpt)
+                    or EXPERIENCE_MONTHS.search(excerpt) or EDUCATION.search(excerpt) or ACADEMIC_DEGREE.search(excerpt)
                     or (DEGREE.search(excerpt) and GRAD_DATE.search(excerpt)) or GRAD_YEAR_MENTION.search(excerpt)):
                 evidence.append({"label": section, "text": excerpt})
                 seen.add(excerpt)
