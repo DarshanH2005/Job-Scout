@@ -1210,6 +1210,24 @@ def test_new_workday_sources_preserve_customized_watchlist(tmp_path):
         "provider":"", "url":"https://custom.example/jobs"}
 
 
+def test_save_contact_without_creating_a_referral(desk, monkeypatch):
+    client, store = desk
+    monkeypatch.setattr("scout.research.brave_key", lambda: "")
+    job = saved_job(client)
+    contact = {"name":"Alex Example", "title":"Data scientist", "source":"https://example.com/team",
+               "notes":"Team and current role need verification."}
+    saved = result(client.post(f"/api/jobs/{job['id']}/contacts", json=contact), 201)
+    assert saved["name"] == contact["name"] and saved["source"] == contact["source"]
+    assert result(client.get("/api/outreach"))["items"] == []
+    assert store.job(job["id"])["referrals"] == []
+    people = result(client.get(f"/api/jobs/{job['id']}/people"))["people"]
+    assert people[0]["id"] == saved["id"] and people[0]["notes"] == contact["notes"]
+    duplicate = result(client.post(f"/api/jobs/{job['id']}/contacts", json={**contact,"name":"alex example", "notes":"Changed"}), 201)
+    assert duplicate["id"] == saved["id"] and duplicate["notes"] == contact["notes"]
+    result(client.post(f"/api/jobs/{job['id']}/contacts", json={**contact,"name":"Other Person","source":"javascript:bad"}), 400)
+    result(client.post("/api/jobs/999999/contacts", json=contact), 404)
+
+
 def test_people_and_new_drafts_show_prior_sent_conversations(desk, monkeypatch):
     client, _ = desk
     monkeypatch.setattr("scout.research.brave_key", lambda: "")

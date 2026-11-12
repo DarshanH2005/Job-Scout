@@ -355,14 +355,14 @@ async function findPeople(id) {
 }
 function person(index) {
   const p=S.people[index]||{};
-  S.notes=p.notes||"";
   dialog("Prepare a referral request",`${S.job.company} · ${S.job.title}`,`<form class="form" data-form="draft">
     <label>Person<input name="name" required maxlength="120" value="${E(p.name)}"></label>
     <label>Their role<input name="title" maxlength="200" value="${E(p.title)}"></label>
     <label>Source or profile URL<input type="url" name="source" value="${E(p.source)}"></label>
+    <label>Contact notes<textarea name="notes" maxlength="500">${E(p.notes)}</textarea></label>
     <label>Channel<select name="channel">${select(channels)}</select></label>
     <label>One relevant fact about you <span class="hint">Optional. For example, “I built a Python and SQL pipeline for a student project.”</span><input name="evidence" maxlength="350"></label>
-    <div class="actions"><button class="button primary">Prepare draft</button>${B("Back to job","job-back")}</div></form>`);
+    <div class="actions"><button class="button primary">Prepare draft</button><button class="button" type="submit" data-save-only="true">Save person for later</button>${B("Back to job","job-back")}</div></form>`);
 }
 async function openConversation(id, returnJob=null) {
   S.item=await api(`/outreach/${id}`);
@@ -601,7 +601,7 @@ document.addEventListener("submit",event=>{
   if(!form) return;
   event.preventDefault();
   const data=Object.fromEntries(new FormData(form)),id=form.dataset.id;
-  withButton($("button:not([type=button])",form),async()=>{
+  withButton(event.submitter||$("button:not([type=button])",form),async()=>{
     switch(form.dataset.form) {
       case "profile":
         await api("/profile","PUT",{graduation_year:data.graduation_year?Number(data.graduation_year):null});
@@ -629,7 +629,13 @@ document.addEventListener("submit",event=>{
         break;
       case "draft": {
         const {channel,evidence,...contact}=data;
-        const item=await api(`/jobs/${S.job.id}/draft`,"POST",{channel,evidence,contact:{...contact,notes:S.notes}});
+        if(event.submitter?.dataset.saveOnly) {
+          const jobId=S.job.id;
+          await api(`/jobs/${jobId}/contacts`,"POST",contact);
+          await openJob(jobId);await findPeople(jobId);notice("Person saved for later.");
+          break;
+        }
+        const item=await api(`/jobs/${S.job.id}/draft`,"POST",{channel,evidence,contact});
         await openConversation(item.id,S.job.id);await refreshNextActions();notice("Draft ready to review.");
         break;
       }

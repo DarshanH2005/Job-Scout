@@ -534,6 +534,19 @@ def create_app(db_path=None, seed=True):
     async def people(job_id: int):
         return await find_people(store, job_or_404(store, job_id), research_cache)
 
+    @app.post("/api/jobs/{job_id}/contacts", status_code=201)
+    async def save_contact(job_id: int, person: ContactInput):
+        job = job_or_404(store, job_id)
+        name = person.name.strip() or fail("Enter the contact name.")
+        source = required_url(person.source) if person.source.strip() else ""
+        with store.connect() as conn:
+            conn.execute("""INSERT INTO contacts(company_id,name,title,source,notes) VALUES(?,?,?,?,?)
+                         ON CONFLICT(company_id,name) DO NOTHING""",
+                         (job["company_id"], name, person.title.strip(), source, person.notes.strip()))
+            contact = conn.execute("SELECT * FROM contacts WHERE company_id=? AND name=?",
+                                   (job["company_id"], name)).fetchone()
+        return dict(contact)
+
     @app.post("/api/jobs/{job_id}/draft", status_code=201)
     async def draft(job_id: int, data: DraftInput):
         job = job_or_404(store, job_id)
