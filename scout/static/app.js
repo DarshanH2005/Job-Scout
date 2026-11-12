@@ -477,7 +477,7 @@ function showConversation() {
       <p class="hint">Job Scout checks the thread for a reply first. If the app is closed, it checks and sends when reopened.</p></details>`:""}
     <div class="actions">${sendRequest?B("Send via Gmail","gmail-send",i.id,"primary"):""}${B("Copy message","copy-message","",sendRequest?"":"primary")}${i.initial_schedule_id?(!i.gmail_send_pending?B("Cancel scheduled request","gmail-cancel-initial",i.id,"small"):""):'<button class="button">Save edits</button>'}${S.info.rewrite_configured&&!i.initial_schedule_id?B("AI rewrite","rewrite"):""}</div>
     ${sendRequest&&mail.scheduling?`<details class="section"><summary>Schedule this request</summary><label>Send date and time<input type="datetime-local" id="initial-send-at"></label>
-      <p class="hint">The app sends the reviewed text while it is open, or after it next opens. It pauses if the recipient, job, or an existing conversation changes.</p>
+      <p class="hint">The app checks the employer posting before sending. It pauses if the job is closed or cannot be verified, or if the recipient, job or an existing conversation changes. Manually added jobs may need a manual send.</p>
       ${B("Schedule request","gmail-schedule-initial",i.id,"small")}</details>`:""}</form>`:
     `<details><summary>Original request</summary><div class="description">${E(original)}</div></details>`}
     ${waiting?`<section class="section"><p class="eyebrow">FOLLOW-UP</p>

@@ -92,6 +92,8 @@ SELECT o.*, c.name AS person, c.source, c.profile_url, c.email, c.email_source, 
        s.job_title AS initial_scheduled_job_title, s.job_url AS initial_scheduled_job_url,
        s.auto_text AS initial_scheduled_auto_text, s.auto_days AS initial_scheduled_auto_days,
        s.issue AS initial_scheduled_issue, j.archived AS job_archived, co.status AS job_source_status,
+       co.provider AS job_provider, co.board AS job_board, co.enabled AS job_source_enabled,
+       j.external_id AS job_external_id, j.canonical_url AS job_canonical_url, j.manual AS job_manual,
        CASE WHEN o.state IN ('closed','submitted') THEN 'completed'
             WHEN o.gmail_send_pending<>'' THEN 'delivery'
             WHEN coalesce(s.issue,'')<>'' OR coalesce(f.issue,'')<>'' THEN 'schedule_issue'

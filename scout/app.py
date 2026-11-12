@@ -280,6 +280,41 @@ def automatic_scan_due(store):
         return now()
 
 
+async def verify_listing(store, job_id):
+    """Check one saved job against its employer source without changing scan state."""
+    saved = job_or_404(store, job_id)
+    company = store.one("SELECT * FROM companies WHERE id=?", (saved["company_id"],))
+    if not company or saved["manual"] or company["provider"] not in PROVIDERS:
+        return {"status":"manual", "checked_at":None, "detail":"Open the posting to verify this manually added role."}
+    if company["provider"] == "workday":
+        stamp = now()
+        try:
+            base, public_base = workday_base(company["board"])
+            path = workday_path(saved["external_id"])
+            async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+                detail = await fetch_json(client, base + path)
+            info = detail["jobPostingInfo"]
+            if canonical_url(info["externalUrl"]) != canonical_url(public_base + path):
+                raise ValueError("The employer posting did not match.")
+            if info.get("canApply") is not True:
+                return {"status":"unavailable", "checked_at":stamp, "detail":"The employer did not confirm that applications are open."}
+            return {"status":"listed", "checked_at":stamp, "detail":"The employer's posting is accepting applications."}
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return {"status":"not_listed", "checked_at":stamp, "detail":"The employer posting was not found."}
+            return {"status":"unavailable", "checked_at":stamp, "detail":"The employer posting could not be checked."}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+            return {"status":"unavailable", "checked_at":stamp, "detail":"The employer posting could not be checked."}
+    async with httpx.AsyncClient(timeout=12) as client:
+        postings, error = await fetch_board(client, company, asyncio.Semaphore(1))
+    stamp = now()
+    if error:
+        return {"status":"unavailable", "checked_at":stamp, "detail":error}
+    listed = any(posting["external_id"] == saved["external_id"] or posting["canonical_url"] == saved["canonical_url"]
+                 for posting in postings)
+    return {"status":"listed" if listed else "not_listed", "checked_at":stamp, "detail":""}
+
+
 def create_app(db_path=None, seed=True):
     store = Store(db_path or os.getenv("SCOUT_DB") or APP_DATA / "scout.sqlite3")
     scanner, gmail = Scanner(store), Gmail(store)
@@ -575,37 +610,7 @@ def create_app(db_path=None, seed=True):
 
     @app.post("/api/jobs/{job_id}/verify")
     async def verify_job(job_id: int):
-        saved = job_or_404(store, job_id)
-        company = store.one("SELECT * FROM companies WHERE id=?", (saved["company_id"],))
-        if saved["manual"] or company["provider"] not in PROVIDERS:
-            return {"status": "manual", "checked_at": None, "detail": "Open the posting to verify this manually added role."}
-        if company["provider"] == "workday":
-            stamp = now()
-            try:
-                base, public_base = workday_base(company["board"])
-                path = workday_path(saved["external_id"])
-                async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
-                    detail = await fetch_json(client, base + path)
-                info = detail["jobPostingInfo"]
-                if canonical_url(info["externalUrl"]) != canonical_url(public_base + path):
-                    raise ValueError("The employer posting did not match.")
-                if info.get("canApply") is not True:
-                    return {"status":"unavailable", "checked_at":stamp, "detail":"The employer did not confirm that applications are open."}
-                return {"status":"listed", "checked_at":stamp, "detail":"The employer's posting is accepting applications."}
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    return {"status":"not_listed", "checked_at":stamp, "detail":"The employer posting was not found."}
-                return {"status":"unavailable", "checked_at":stamp, "detail":"The employer posting could not be checked."}
-            except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
-                return {"status":"unavailable", "checked_at":stamp, "detail":"The employer posting could not be checked."}
-        async with httpx.AsyncClient(timeout=12) as client:
-            postings, error = await fetch_board(client, company, asyncio.Semaphore(1))
-        stamp = now()
-        if error:
-            return {"status": "unavailable", "checked_at": stamp, "detail": error}
-        listed = any(posting["external_id"] == saved["external_id"] or posting["canonical_url"] == saved["canonical_url"]
-                     for posting in postings)
-        return {"status": "listed" if listed else "not_listed", "checked_at": stamp, "detail": ""}
+        return await verify_listing(store, job_id)
 
     @app.post("/api/jobs", status_code=201)
     async def import_job(data: JobInput):
@@ -1026,6 +1031,19 @@ def create_app(db_path=None, seed=True):
             if follow_up and (not thread_id or item["due_at"] != data.expected_due_at
                               or item["mail_account"] != data.account):
                 fail("Reopen the linked Gmail conversation and review its history.", 409)
+            if initial_schedule:
+                try:
+                    check = await asyncio.wait_for(verify_listing(store, item["job_id"]), timeout=30)
+                    if not isinstance(check, dict):
+                        raise ValueError("Invalid verification result.")
+                except Exception:
+                    fail("The employer posting could not be verified. Review it before rescheduling.", 409)
+                if check.get("status") != "listed":
+                    if check.get("status") == "not_listed":
+                        fail("The employer no longer lists this job. Review it before contacting this person.", 409)
+                    if check.get("status") == "manual":
+                        fail("This job cannot be verified automatically. Review it and send manually if appropriate.", 409)
+                    fail("The employer posting could not be verified. Review it before rescheduling.", 409)
             try:
                 account, token = await gmail.token(send=True)
                 if account != data.account:
@@ -1069,7 +1087,8 @@ def create_app(db_path=None, seed=True):
                                                              "initial_scheduled_message", "initial_scheduled_issue", "initial_scheduled_account",
                                                              "initial_scheduled_recipient", "initial_scheduled_job_title", "initial_scheduled_job_url",
                                                              "initial_scheduled_auto_text", "initial_scheduled_auto_days", "job_archived",
-                                                             "job_title", "job_url", "job_source_status", draft_field)):
+                                                             "job_title", "job_url", "job_source_status", "job_provider", "job_board",
+                                                             "job_source_enabled", "job_external_id", "job_canonical_url", "job_manual", draft_field)):
                     fail("This conversation changed. Reopen it before sending.", 409)
                 if schedule is not None and (store.setting("gmail_account") != account
                                              or store.setting("gmail_send_enabled") != "1"):

@@ -324,7 +324,7 @@ def test_scheduled_gmail_follow_up_checks_thread_and_sends_at_most_once(tmp_path
                 assert not recovered["gmail_send_pending"] and recovered["schedule_id"] is None
 
 
-@pytest.mark.parametrize("outcome", ["sent", "unconfirmed", "recipient_changed", "job_changed", "archived", "source_failed", "other_conversation"])
+@pytest.mark.parametrize("outcome", ["sent", "unconfirmed", "recipient_changed", "job_changed", "archived", "source_failed", "other_conversation", "not_listed", "unavailable", "manual", "verify_error", "source_changed"])
 def test_scheduled_initial_gmail_request_sends_once_or_pauses(tmp_path, monkeypatch, outcome):
     from datetime import datetime, timedelta, timezone
 
@@ -339,8 +339,15 @@ def test_scheduled_initial_gmail_request_sends_once_or_pauses(tmp_path, monkeypa
         if outcome == "unconfirmed":
             raise httpx.ReadTimeout("delivery not confirmed")
         return {"id":"initial-message", "threadId":"initial-thread"}
+    async def verify(_store, job_id):
+        if outcome == "verify_error":
+            raise httpx.ReadTimeout("employer unavailable")
+        if outcome == "source_changed":
+            store.write("UPDATE companies SET board='changed' WHERE id=(SELECT company_id FROM jobs WHERE id=?)", (job_id,))
+        return {"status":outcome if outcome in {"not_listed", "unavailable", "manual"} else "listed"}
     monkeypatch.setattr(Gmail, "token", token)
     monkeypatch.setattr(Gmail, "send_message", staticmethod(send))
+    monkeypatch.setattr(app_module, "verify_listing", verify)
     with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765") as client:
         store.set_setting("gmail_account", "me@example.com")
         store.set_setting("gmail_send_enabled", "1")
@@ -387,6 +394,12 @@ def test_scheduled_initial_gmail_request_sends_once_or_pauses(tmp_path, monkeypa
             result(client.delete(route + "/" + scheduled["initial_schedule_id"]), 409)
         else:
             assert attempts == [] and updated["state"] == "draft" and updated["initial_scheduled_issue"]
+            if outcome == "not_listed":
+                assert "no longer lists" in updated["initial_scheduled_issue"]
+            elif outcome == "manual":
+                assert "cannot be verified automatically" in updated["initial_scheduled_issue"]
+            elif outcome in {"unavailable", "verify_error"}:
+                assert "could not be verified" in updated["initial_scheduled_issue"]
             result(client.delete(route + "/" + scheduled["initial_schedule_id"]))
         time.sleep(.05)
         assert len(attempts) <= 1
@@ -403,8 +416,11 @@ def test_initial_schedule_survives_restart_and_is_sent_once(tmp_path, monkeypatc
     async def send(token, message, thread_id):
         attempts.append(message.get_content().strip())
         return {"id":"message", "threadId":"thread"}
+    async def verify(_store, _job_id):
+        return {"status":"listed"}
     monkeypatch.setattr(Gmail, "token", token)
     monkeypatch.setattr(Gmail, "send_message", staticmethod(send))
+    monkeypatch.setattr(app_module, "verify_listing", verify)
     with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765") as client:
         store.set_setting("gmail_account", "me@example.com")
         store.set_setting("gmail_send_enabled", "1")
