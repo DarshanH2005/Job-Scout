@@ -827,6 +827,17 @@ def test_abnormal_people_works_without_paid_search_key(desk, monkeypatch):
     assert second["official_cached"] is True and len(calls) == 1
 
 
+def test_missing_gmail_credential_dependency_gives_actionable_error(desk, monkeypatch):
+    client, store = desk
+    store.set_setting("gmail_account", "me@example.com")
+    def unavailable():
+        raise ModuleNotFoundError("No module named keyring", name="keyring")
+    monkeypatch.setattr(Gmail, "_vault", staticmethod(unavailable))
+    issue = result(client.post("/api/gmail/check"), 502)["detail"]
+    assert "Launch Job Scout.cmd" in issue and "credential storage" in issue
+    assert result(client.get("/api/state"))["mail"]["issue"] == issue
+
+
 def test_expired_gmail_authorization_surfaces_reconnect_in_settings(desk, monkeypatch):
     from types import SimpleNamespace
 
@@ -850,6 +861,63 @@ def test_expired_gmail_authorization_surfaces_reconnect_in_settings(desk, monkey
     mail = result(client.get("/api/state"))["mail"]
     assert mail["issue"] == message
     assert mail["send_enabled"]
+
+
+def test_daily_scan_schedule_uses_full_scan_and_retries_failures(tmp_path):
+    store = Store(tmp_path / "daily-due.sqlite3")
+    store.initialize(seed=False)
+    assert app_module.automatic_scan_due(store) is None
+    store.set_setting("automatic_scan", "1")
+    store.write("INSERT INTO scans(started_at,state,scope,total) VALUES('2026-11-01T12:00:00+00:00','completed','full',0)")
+    assert app_module.automatic_scan_due(store) == "2026-11-02T12:00:00.000000+00:00"
+    store.write("INSERT INTO scans(started_at,state,scope,total) VALUES('2026-11-02T01:00:00+00:00','completed','retry',0)")
+    assert app_module.automatic_scan_due(store) == "2026-11-02T12:00:00.000000+00:00"
+    store.write("INSERT INTO scans(started_at,state,scope,total) VALUES('2026-11-02T12:00:00+00:00','interrupted','full',0)")
+    assert app_module.automatic_scan_due(store) == "2026-11-02T13:00:00.000000+00:00"
+    store.write("INSERT INTO scans(started_at,state,scope,total) VALUES('2026-11-02T15:00:00+00:00','failed','full',0)")
+    assert app_module.automatic_scan_due(store) == "2026-11-02T16:00:00.000000+00:00"
+
+
+def test_automatic_scans_are_opt_in_and_resume_after_restart(tmp_path, monkeypatch):
+    db = tmp_path / "daily.sqlite3"
+    store = Store(db)
+    calls = []
+    monkeypatch.setattr(app_module, "SCAN_SCHEDULE_INTERVAL", .01)
+    async def fetch(_client, company, _limit):
+        calls.append(company["board"])
+        await asyncio.sleep(.1)
+        return [sample()], None
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765") as client:
+        register(client)
+        assert not result(client.get("/api/state"))["auto_scan"]["enabled"]
+        time.sleep(.04)
+        assert calls == []
+        assert result(client.put("/api/scan-schedule", json={"enabled":True}))["enabled"]
+        for _ in range(100):
+            if calls:
+                break
+            time.sleep(.01)
+        assert calls == ["sample"]
+        time.sleep(.04)
+        assert store.one("SELECT count(*) AS count FROM scans")["count"] == 1
+        for _ in range(100):
+            if result(client.get("/api/state"))["scan"]["state"] != "running":
+                break
+            time.sleep(.01)
+        state = result(client.get("/api/state"))
+        assert state["scan"]["state"] == "completed" and state["auto_scan"]["next_at"] > app_module.now()
+        time.sleep(.05)
+        assert calls == ["sample"]
+        store.write("UPDATE scans SET started_at='2000-01-01T00:00:00+00:00' WHERE id=?", (state["scan"]["id"],))
+    with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765") as client:
+        for _ in range(100):
+            if len(calls) == 2:
+                break
+            time.sleep(.01)
+        assert calls == ["sample", "sample"]
+        result(client.put("/api/scan-schedule", json={"enabled":False}))
+        assert result(client.get("/api/state"))["auto_scan"]["next_at"] is None
 
 
 def test_feed_normalization_does_not_block_the_event_loop(monkeypatch):

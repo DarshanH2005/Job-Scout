@@ -18,7 +18,7 @@ const tag = (label,style="") => `<span class="badge ${style}">${E(label)}</span>
 const head = (title,text,action="",h="h1") => `<div class="page-head"><div><${h}>${E(title)}</${h}><p>${E(text)}</p></div><div class="actions">${action}</div></div>`;
 const empty = (title,text,action="") => `<div class="panel empty"><strong>${E(title)}</strong><p>${E(text)}</p>${action}</div>`;
 const select = (values,selected="") => Object.entries(values).map(([id,name])=>`<option value="${id}" ${id===selected?"selected":""}>${E(name)}</option>`).join("");
-let messageTimer, pollTimer, searchTimer;
+let messageTimer, pollTimer, searchTimer, autoScanTimer;
 let actionsRequest=0;
 
 async function api(path,method="GET",data) {
@@ -46,7 +46,24 @@ function scanStatus() {
   $("#nav-due").hidden=!stats.due;
   $("#nav-due").textContent=stats.due;
 }
-async function refreshState() { S.info=await api("/state"); scanStatus(); }
+async function refreshState() { S.info=await api("/state"); scanStatus(); watchAutoScan(); }
+function watchAutoScan() {
+  clearTimeout(autoScanTimer);
+  if(!S.info?.auto_scan?.enabled||S.info.scan?.state==="running") return;
+  autoScanTimer=setTimeout(async()=>{
+    const previous=S.info.full_scan?.id;
+    try {
+      await refreshState();
+      if(S.info.scan?.state==="running") {
+        if($("#coverage-panel")) $("#coverage-panel").innerHTML=coverage();
+        pollScan();
+      } else if(S.info.full_scan?.id!==previous) {
+        if($("#coverage-panel")) $("#coverage-panel").innerHTML=coverage();
+        await Promise.all([refreshJobs(),refreshNextActions()]);
+      }
+    } catch { watchAutoScan(); }
+  },30000);
+}
 function pollScan() {
   clearTimeout(pollTimer);
   if (S.info.scan?.state!=="running") return;
@@ -70,12 +87,13 @@ async function startScan(scope="full") {
     if ($("#latest")) $("#latest").checked=false;
   }
   S.info.scan=await api(scope==="retry"?"/scans/retry-failed":scope==="pending"?"/scans/pending":"/scans","POST");
+  watchAutoScan();
   if ($("#coverage-panel")) $("#coverage-panel").innerHTML=coverage();
   if(S.page!=="jobs") location.hash="jobs";
   scanStatus(); pollScan();
 }
 function coverage() {
-  const {stats,scan,full_scan}=S.info;
+  const {stats,scan,full_scan,auto_scan}=S.info;
   const full=scan?.scope==="full"&&scan.state==="running"?scan:full_scan;
   return `<p class="eyebrow">SOURCE STATUS</p><h3>Scan coverage</h3><div class="coverage">
     <div>Company watchlist <strong>${num(stats.companies)}</strong></div>
@@ -83,6 +101,7 @@ function coverage() {
     <div>Checked in full scan <strong>${full?num(full.checked):"—"}</strong></div>
     <div>Feeds currently failing <strong>${num(stats.failed_feeds)}</strong></div>
     <div>Manual sources in full scan <strong>${full?num(full.unsupported):"—"}</strong></div>
+    ${auto_scan?.enabled?`<div>Next daily scan <strong>${date(auto_scan.next_at,true)}</strong></div>`:""}
     </div>${scan?.state!=="running"&&(stats.failed_feeds||stats.pending_feeds)?`<div class="actions">${stats.pending_feeds?B(`Check ${num(stats.pending_feeds)} new feeds`,"pending-feeds","","small"):""}${stats.failed_feeds?B("Retry failed feeds","retry-feeds","","small"):""}</div>`:""}
     <a href="#watchlist">View employer watchlist →</a>`;
 }
@@ -199,9 +218,13 @@ async function inbox() {
     <div class="panel">${rows.map(inboxRow).join("")}</div></section>`).join(""):empty("No conversations yet","Open a job, find someone to ask, and prepare a draft.",'<a href="#jobs">Browse the job feed →</a>')}`;
 }
 function settings() {
-  const {mail,search_configured,search_from_env,rewrite_configured}=S.info;
+  const {mail,search_configured,search_from_env,rewrite_configured,auto_scan}=S.info;
   return `${head("Settings","Connect optional services for public research and reply checks.")}
   <div class="settings-grid">
+    <section class="panel padded"><h3>Automatic job scans</h3><p>Check the watchlist every 24 hours while Job Scout runs. If it was closed when a scan was due, it checks after reopening. Scans use no AI tokens.</p>
+    <form class="form section" data-form="scan-schedule"><label class="checklabel"><input type="checkbox" name="enabled" ${auto_scan?.enabled?"checked":""} ${auto_scan?.available?"":"disabled"}> Automatically find jobs daily</label>
+    ${auto_scan?.enabled?`<p class="hint">Next check ${date(auto_scan.next_at,true)}. An interrupted scan is retried after an hour.</p>`:""}
+    ${auto_scan?.available?"":'<p class="evidence">Automatic scans are unavailable. Restart Job Scout and check the server log.</p>'}<div><button class="button">Save scan schedule</button></div></form></section>
     <section class="panel padded"><h3>Your graduation year</h3><p>Flag postings that explicitly mention a different graduation year and place them lower in the job feed. This does not determine eligibility.</p>
     <form class="form section" data-form="profile"><label>Expected graduation year<input type="number" name="graduation_year" min="2000" max="2100" step="1" value="${E(S.info.graduation_year??"")}" placeholder="For example, 2027"></label>
     <p class="hint">Stored locally. Clear the field to turn off these warnings.</p><div><button class="button">Save year</button></div></form></section>
@@ -635,6 +658,10 @@ document.addEventListener("submit",event=>{
       case "profile":
         await api("/profile","PUT",{graduation_year:data.graduation_year?Number(data.graduation_year):null});
         await refreshState();notice("Graduation year updated.");
+        break;
+      case "scan-schedule":
+        await api("/scan-schedule","PUT",{enabled:data.enabled==="on"});
+        await refreshState();await render();notice("Scan schedule updated.");
         break;
       case "brave":
         await saveIntegration("brave",data.value);

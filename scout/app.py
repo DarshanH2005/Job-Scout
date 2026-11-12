@@ -31,6 +31,7 @@ load_dotenv(ROOT.parent / ".env")
 APP_DATA = Path(os.getenv("LOCALAPPDATA") or ROOT.parent) / "JobScout"
 CHANNELS = ("linkedin", "gmail", "community")
 GMAIL_SCHEDULE_INTERVAL = 30
+SCAN_SCHEDULE_INTERVAL = 60
 
 
 class CompanyInput(BaseModel):
@@ -58,6 +59,10 @@ class JobFlags(BaseModel):
 
 class CandidateProfile(BaseModel):
     graduation_year: int | None = Field(default=None, ge=2000, le=2100)
+
+
+class AutomaticScan(BaseModel):
+    enabled: bool
 
 
 class ContactInput(BaseModel):
@@ -159,6 +164,8 @@ def job_or_404(store, job_id):
 def mail_failure(exc):
     if isinstance(exc, ValueError):
         return str(exc)
+    if isinstance(exc, ModuleNotFoundError) and exc.name == "keyring":
+        return "Gmail credential storage is missing. Open Launch Job Scout.cmd to install the required dependencies."
     if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (400, 401, 403):
         return "Google rejected Gmail access. Check the Gmail API setup or reconnect from Settings."
     return "Gmail could not be checked. Try again from Settings."
@@ -233,6 +240,23 @@ class Scanner:
             self.store.write("UPDATE scans SET state=?,note=?,finished_at=? WHERE id=?", (state, note, now(), scan_id))
 
 
+def automatic_scan_due(store):
+    """Use the last full scan as the durable schedule; retries do not reset it."""
+    if store.setting("automatic_scan") != "1":
+        return None
+    last = store.one("SELECT started_at,state FROM scans WHERE scope='full' ORDER BY id DESC LIMIT 1")
+    if not last:
+        return now()
+    try:
+        started = datetime.fromisoformat(last["started_at"])
+        if started.tzinfo is None:
+            return now()
+        delay = timedelta(hours=1 if last["state"] in {"failed", "interrupted"} else 24)
+        return (started.astimezone(timezone.utc) + delay).isoformat(timespec="microseconds")
+    except (ValueError, TypeError, OverflowError):
+        return now()
+
+
 def create_app(db_path=None, seed=True):
     store = Store(db_path or os.getenv("SCOUT_DB") or APP_DATA / "scout.sqlite3")
     scanner, gmail = Scanner(store), Gmail(store)
@@ -252,6 +276,17 @@ def create_app(db_path=None, seed=True):
             if store.setting("gmail_account"):
                 with suppress(HTTPException):
                     await check_mail()
+
+    async def automatic_scan_loop():
+        while True:
+            await asyncio.sleep(SCAN_SCHEDULE_INTERVAL)
+            try:
+                due = automatic_scan_due(store)
+                if due and due <= now() and not scanner.running:
+                    scanner.start()
+            except Exception:
+                import logging
+                logging.exception("Could not start the automatic job scan")
 
     async def follow_up_loop():
         while True:
@@ -305,11 +340,13 @@ def create_app(db_path=None, seed=True):
         store.initialize(seed=seed)
         worker = asyncio.create_task(mail_loop())
         follow_ups = asyncio.create_task(follow_up_loop())
+        automatic_scans = asyncio.create_task(automatic_scan_loop())
         _app.state.follow_ups = follow_ups
+        _app.state.automatic_scans = automatic_scans
         try:
             yield
         finally:
-            for task in (worker, follow_ups, scanner.task):
+            for task in (worker, follow_ups, automatic_scans, scanner.task):
                 if task and not task.done():
                     task.cancel()
                     with suppress(asyncio.CancelledError):
@@ -346,6 +383,8 @@ def create_app(db_path=None, seed=True):
         return {"stats": store.stats(), "scan": store.one("SELECT * FROM scans ORDER BY id DESC LIMIT 1"),
                 "full_scan": store.last_full_scan(),
                 "graduation_year": store.graduation_year(),
+                "auto_scan": {"enabled": store.setting("automatic_scan") == "1", "next_at": automatic_scan_due(store),
+                              "available": bool(getattr(app.state, "automatic_scans", None) and not app.state.automatic_scans.done())},
                 "search_configured": bool(credentials.brave_key()),
                 "search_from_env": bool(os.getenv("SCOUT_BRAVE_KEY")),
                 "rewrite_configured": bool(os.getenv("SCOUT_OPENAI_KEY") and os.getenv("SCOUT_OPENAI_MODEL")),
@@ -361,6 +400,13 @@ def create_app(db_path=None, seed=True):
     async def update_profile(data: CandidateProfile):
         store.set_setting("graduation_year", str(data.graduation_year) if data.graduation_year is not None else "")
         return {"graduation_year": store.graduation_year()}
+
+    @app.put("/api/scan-schedule")
+    async def update_scan_schedule(data: AutomaticScan):
+        if data.enabled and (not getattr(app.state, "automatic_scans", None) or app.state.automatic_scans.done()):
+            fail("Automatic scans are unavailable. Restart Job Scout before enabling them.", 409)
+        store.set_setting("automatic_scan", "1" if data.enabled else "")
+        return {"enabled": data.enabled, "next_at": automatic_scan_due(store)}
 
     @app.put("/api/integrations/{name}")
     async def configure_integration(name: str, data: IntegrationInput):
