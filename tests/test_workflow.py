@@ -1605,6 +1605,36 @@ def test_workday_requires_complete_stable_snapshot(case):
             assert "capped" in error
 
 
+def test_workday_skips_untitled_postings_without_losing_known_jobs(desk, monkeypatch):
+    from scout.feeds import normalize_workday_rows
+    client, store = desk
+    company = register(client, provider="workday", board="sample.wd5.External",
+                       url="https://sample.wd5.myworkdayjobs.com/External")
+    def posting(number, title):
+        return {"title":title, "externalPath":f"/job/India/Engineer_R{number}", "locationsText":"Bengaluru, India"}
+    base = "https://sample.wd5.myworkdayjobs.com/External"
+    rows = [posting(1, "Junior Software Engineer"), posting(2, "Software Engineer")]
+    async def fetch(_client, _company, _limit):
+        return normalize_workday_rows(rows, base), None
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    scan(client)
+    preserved = store.one("SELECT * FROM jobs WHERE external_id='/job/India/Engineer_R1'")
+    absent = store.one("SELECT * FROM jobs WHERE external_id='/job/India/Engineer_R2'")
+    result(client.patch(f"/api/jobs/{preserved['id']}", json={"saved":True, "applied":True}))
+    rows = [posting(1, ""), posting(3, "Junior Software Engineer"), posting(4, None)]
+    latest = scan(client)
+    assert latest["checked"] == 1 and latest["fresh"] == 1 and latest["failed"] == 0
+    company_after = store.one("SELECT * FROM companies WHERE id=?", (company["id"],))
+    assert company_after["status"] == "checked" and "2 without a title skipped" in company_after["note"]
+    kept = store.job(preserved["id"])
+    assert kept["title"] == preserved["title"] and kept["first_seen"] == preserved["first_seen"]
+    assert kept["saved"] and kept["applied_at"] and not kept["archived"] and kept["misses"] == 0
+    assert not store.one("SELECT id FROM jobs WHERE external_id='/job/India/Engineer_R4'")
+    assert store.job(absent["id"])["misses"] == 1
+    scan(client)
+    assert not store.job(preserved["id"])["archived"] and store.job(absent["id"])["archived"]
+
+
 def test_workday_details_are_checked_and_loaded_on_demand(desk, monkeypatch):
     client, store = desk
     store.set_setting("graduation_year", "2027")

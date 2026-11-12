@@ -426,10 +426,11 @@ def normalize_workday_rows(rows, public_base):
     for row in rows:
         path = workday_path(row["externalPath"])
         title = clean(row.get("title"))
-        if not title:
-            raise ValueError("Workday returned a posting without a title.")
         remote = "Remote" if str(row.get("remoteType", "")).casefold() == "remote" else ""
-        jobs.append(build_job(path, title, "", row.get("locationsText"), remote, "", public_base + path))
+        job = build_job(path, title, "", row.get("locationsText"), remote, "", public_base + path)
+        if not title:
+            job["_missing_title"] = True
+        jobs.append(job)
     return jobs
 
 

@@ -299,12 +299,22 @@ class Store:
                              (error, checked_at, company_id))
                 conn.execute("UPDATE scans SET failed=failed+1 WHERE id=?", (scan_id,))
                 return
+            missing_titles = sum(bool(job.get("_missing_title")) for job in jobs)
+            note = f"{len(jobs)} published openings"
+            if missing_titles:
+                note += f"; {missing_titles} without a title skipped"
             conn.execute("UPDATE companies SET status='checked', note=?, checked_at=?, successful_at=? WHERE id=?",
-                         (f"{len(jobs)} published openings", checked_at, checked_at, company_id))
+                         (note, checked_at, checked_at, company_id))
             fresh = 0
             new_scan = baseline_id if company["successful_at"] else None
             last_completed = conn.execute("SELECT coalesce(max(id),0) FROM scans WHERE scope='full' AND state='completed'").fetchone()[0]
             for job in jobs:
+                if job.get("_missing_title"):
+                    # The posting was observed, but its existing details must not be replaced by blanks.
+                    conn.execute("""UPDATE jobs SET last_seen=?, misses=0, archived=0
+                        WHERE company_id=? AND manual=0 AND (external_id=? OR canonical_url=?)""",
+                        (checked_at, company_id, job["external_id"], job["canonical_url"]))
+                    continue
                 _, discovered = self.upsert_job(conn, company_id, job, checked_at, new_scan, last_completed_scan=last_completed)
                 fresh += bool(discovered and new_scan and job["score"])
             # Two successful snapshots must agree before a posting disappears.
