@@ -2198,7 +2198,7 @@ def test_next_actions_include_due_targets_and_actionable_referrals(desk):
 
 def test_verify_posting_distinguishes_presence_absence_and_feed_failure(desk, monkeypatch):
     client, _ = desk
-    register(client)
+    register(client, provider="ashby", url="https://jobs.ashbyhq.com/sample")
     rows, error, calls = [sample()], None, []
 
     async def fetch(_client, company, _limit):
@@ -2221,3 +2221,106 @@ def test_verify_posting_distinguishes_presence_absence_and_feed_failure(desk, mo
     manual = saved_job(client)
     assert result(client.post(f"/api/jobs/{manual['id']}/verify"))["status"] == "manual"
     assert calls == ["sample"] * 4
+
+
+@pytest.mark.parametrize("provider,board,posting_id,public_url,host,path", [
+    ("greenhouse", "sample", "123", "https://job-boards.greenhouse.io/sample/jobs/123", "boards-api.greenhouse.io", "/v1/boards/sample/jobs/123"),
+    ("lever", "sample", "abc-123", "https://jobs.lever.co/sample/abc-123", "api.lever.co", "/v0/postings/sample/abc-123"),
+    ("smartrecruiters", "Sample", "123", "https://jobs.smartrecruiters.com/Sample/123", "api.smartrecruiters.com", "/v1/companies/Sample/postings/123"),
+])
+@pytest.mark.parametrize("case", ["listed", "not_found", "wrong_id", "wrong_source", "server_error"])
+def test_individual_posting_verification(desk, monkeypatch, provider, board, posting_id, public_url, host, path, case):
+    client, store = desk
+    job = saved_job(client)
+    store.write("UPDATE companies SET provider=?,board=? WHERE id=?", (provider, board, job["company_id"]))
+    store.write("UPDATE jobs SET manual=0,external_id=?,url=?,canonical_url=? WHERE id=?",
+                (posting_id, public_url, public_url, job["id"]))
+    calls = []
+    def respond(request):
+        calls.append(request)
+        if case == "not_found":
+            return httpx.Response(404)
+        if case == "server_error":
+            return httpx.Response(403)
+        body = {"id": "wrong" if case == "wrong_id" else posting_id}
+        if provider == "greenhouse":
+            body["absolute_url"] = "https://example.com/wrong" if case == "wrong_source" else public_url
+        elif provider == "lever":
+            body["hostedUrl"] = "https://example.com/wrong" if case == "wrong_source" else public_url
+        else:
+            body.update(company={"identifier": "Other" if case == "wrong_source" else board}, active=True)
+        return httpx.Response(200, json=body)
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(app_module.httpx, "AsyncClient", lambda **kwargs: original_client(transport=httpx.MockTransport(respond), **kwargs))
+    check = result(client.post(f"/api/jobs/{job['id']}/verify"))
+    expected = {"listed": "listed", "not_found": "not_listed"}.get(case, "unavailable")
+    assert check["status"] == expected
+    assert len(calls) == 1 and calls[0].url.host == host and calls[0].url.path == path
+    if provider == "lever":
+        assert calls[0].url.params["mode"] == "json"
+
+
+@pytest.mark.parametrize("active,expected", [(False, "not_listed"), (None, "unavailable")])
+def test_smartrecruiters_requires_active_confirmation(desk, monkeypatch, active, expected):
+    client, store = desk
+    job = saved_job(client)
+    url = "https://jobs.smartrecruiters.com/Sample/123"
+    store.write("UPDATE companies SET provider='smartrecruiters',board='Sample' WHERE id=?", (job["company_id"],))
+    store.write("UPDATE jobs SET manual=0,external_id='123',url=?,canonical_url=? WHERE id=?", (url, url, job["id"]))
+    body = {"id": "123", "company": {"identifier": "Sample"}}
+    if active is not None:
+        body["active"] = active
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(app_module.httpx, "AsyncClient", lambda **kwargs: original_client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)), **kwargs))
+    assert result(client.post(f"/api/jobs/{job['id']}/verify"))["status"] == expected
+
+
+def test_invalid_posting_identifier_never_requests_network(desk, monkeypatch):
+    client, store = desk
+    job = saved_job(client)
+    store.write("UPDATE companies SET provider='greenhouse',board='sample' WHERE id=?", (job["company_id"],))
+    store.write("UPDATE jobs SET manual=0,external_id='../123' WHERE id=?", (job["id"],))
+    def unexpected(**kwargs):
+        pytest.fail("Invalid identifiers must not trigger a request")
+    monkeypatch.setattr(app_module.httpx, "AsyncClient", unexpected)
+    assert result(client.post(f"/api/jobs/{job['id']}/verify"))["status"] == "unavailable"
+
+
+def test_scheduled_request_pauses_when_live_posting_is_inactive(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    db = tmp_path / "inactive-scheduled.sqlite3"
+    store = Store(db)
+    attempts = []
+    monkeypatch.setattr(app_module, "GMAIL_SCHEDULE_INTERVAL", .01)
+    async def token(self, send=False):
+        return "me@example.com", "fake-token"
+    async def send(*args):
+        attempts.append(args)
+        return {"id": "message", "threadId": "thread"}
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(app_module.httpx, "AsyncClient", lambda **kwargs: original_client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"id":"123", "company":{"identifier":"Sample"}, "active":False})), **kwargs))
+    monkeypatch.setattr(Gmail, "token", token)
+    monkeypatch.setattr(Gmail, "send_message", staticmethod(send))
+    with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765") as client:
+        store.set_setting("gmail_account", "me@example.com")
+        store.set_setting("gmail_send_enabled", "1")
+        job = saved_job(client)
+        url = "https://jobs.smartrecruiters.com/Sample/123"
+        store.write("UPDATE companies SET provider='smartrecruiters',board='Sample' WHERE id=?", (job["company_id"],))
+        store.write("UPDATE jobs SET manual=0,external_id='123',url=?,canonical_url=? WHERE id=?", (url, url, job["id"]))
+        item = create_draft(client, job, "gmail")
+        path = f"/api/outreach/{item['id']}"
+        result(client.patch(path + "/contact-handoff", json={"email":"jane@example.com"}))
+        scheduled = result(client.post(path + "/gmail/initial-schedule", json={"text":"Reviewed request.",
+            "account":"me@example.com", "recipient":"jane@example.com",
+            "send_at":(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}))
+        store.write("UPDATE gmail_initial_schedule SET send_at='2000-01-01T00:00:00Z' WHERE id=?", (scheduled["initial_schedule_id"],))
+        for _ in range(150):
+            updated = result(client.get(path))
+            if updated["initial_scheduled_issue"]:
+                break
+            time.sleep(.01)
+        assert "no longer lists" in updated["initial_scheduled_issue"]
+        assert not attempts and not updated["gmail_send_pending"] and updated["state"] == "draft"

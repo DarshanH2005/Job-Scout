@@ -286,6 +286,45 @@ async def verify_listing(store, job_id):
     company = store.one("SELECT * FROM companies WHERE id=?", (saved["company_id"],))
     if not company or saved["manual"] or company["provider"] not in PROVIDERS:
         return {"status":"manual", "checked_at":None, "detail":"Open the posting to verify this manually added role."}
+    if company["provider"] in {"greenhouse", "lever", "smartrecruiters"}:
+        stamp = now()
+        try:
+            provider, board, posting_id = company["provider"], company["board"], str(saved["external_id"])
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", board):
+                raise ValueError("Invalid board identifier.")
+            pattern = r"\d+" if provider in {"greenhouse", "smartrecruiters"} else r"[A-Za-z0-9_-]{1,128}"
+            if not re.fullmatch(pattern, posting_id):
+                raise ValueError("Invalid posting identifier.")
+            board_part, id_part = quote(board, safe=""), quote(posting_id, safe="")
+            if provider == "greenhouse":
+                url = f"https://boards-api.greenhouse.io/v1/boards/{board_part}/jobs/{id_part}"
+            elif provider == "lever":
+                url = f"https://api.lever.co/v0/postings/{board_part}/{id_part}?mode=json"
+            else:
+                url = f"https://api.smartrecruiters.com/v1/companies/{board_part}/postings/{id_part}"
+            async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+                detail = await fetch_json(client, url)
+            if str(detail["id"]) != posting_id:
+                raise ValueError("The employer posting did not match.")
+            if provider == "smartrecruiters":
+                if detail["company"]["identifier"].casefold() != board.casefold():
+                    raise ValueError("The employer did not match.")
+                if detail.get("active") is False:
+                    return {"status":"not_listed", "checked_at":stamp, "detail":"The employer marked this posting inactive."}
+                if detail.get("active") is not True:
+                    raise ValueError("The employer did not confirm the posting is active.")
+                public = f"https://jobs.smartrecruiters.com/{board_part}/{id_part}"
+            else:
+                public = detail.get("absolute_url") if provider == "greenhouse" else detail.get("hostedUrl")
+            if not public_url(public) or canonical_url(public) != saved["canonical_url"]:
+                raise ValueError("The employer link changed.")
+            return {"status":"listed", "checked_at":stamp, "detail":"The employer returned this posting."}
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return {"status":"not_listed", "checked_at":stamp, "detail":"The employer did not return this posting."}
+            return {"status":"unavailable", "checked_at":stamp, "detail":"The employer posting could not be checked."}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+            return {"status":"unavailable", "checked_at":stamp, "detail":"The employer posting could not be checked."}
     if company["provider"] == "workday":
         stamp = now()
         try:
