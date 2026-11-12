@@ -313,20 +313,24 @@ class Store:
             clauses.append("instr(lower(j.title || ' ' || c.name || ' ' || j.department), lower(?))>0")
             args.append(search)
         where = " AND ".join(clauses)
+        year = self.graduation_year()
         fresh_first = ("CASE WHEN j.new_scan=(SELECT MAX(id) FROM scans WHERE scope='full' AND state='completed') "
                        "THEN 0 ELSE 1 END, " if view not in {"saved", "hidden"} else "")
+        year_order = "graduation_conflict(j.description), " if year and view not in {"saved", "hidden"} else ""
         order = """CASE j.region WHEN 'india_remote' THEN 0 WHEN 'india' THEN 0 WHEN 'us_remote' THEN 2
-                   WHEN 'unclear' THEN 3 ELSE 4 END, c.status='failed', """ + fresh_first + """j.score DESC,
+                   WHEN 'unclear' THEN 3 ELSE 4 END, c.status='failed', """ + year_order + fresh_first + """j.score DESC,
                    coalesce(julianday(j.posted_at),julianday(j.first_seen)) DESC, j.id DESC"""
         if view == "saved":
             order = "CASE WHEN j.applied_at IS NULL THEN j.application_target END ASC NULLS LAST, " + order
-        rows = self.all(f"""SELECT j.id,j.title,j.location,j.url,j.apply_url,j.posted_at,j.first_seen,j.last_seen,j.new_scan,
+        with self.connect() as conn:
+            if year_order:
+                conn.create_function("graduation_conflict", 1, lambda text: int(graduation_warning(text, year) is not None))
+            rows = [dict(row) for row in conn.execute(f"""SELECT j.id,j.title,j.location,j.url,j.apply_url,j.posted_at,j.first_seen,j.last_seen,j.new_scan,
                                    j.region,j.evidence,j.reason,j.score,j.saved,j.applied_at,j.archived,j.manual,j.hidden,
                                    j.deadline_at,j.application_target,j.description AS _description,
                                    c.name AS company,c.provider,c.status AS source_status
                             FROM jobs j JOIN companies c ON c.id=j.company_id WHERE {where}
-                            ORDER BY {order} LIMIT 31 OFFSET ?""", (*args, offset))
-        year = self.graduation_year()
+                            ORDER BY {order} LIMIT 31 OFFSET ?""", (*args, offset)).fetchall()]
         for row in rows:
             row["graduation_warning"] = graduation_warning(row.pop("_description"), year)
         return rows

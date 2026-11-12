@@ -308,7 +308,7 @@ def eligibility_evidence(description, limit=4):
 
 def graduation_warning(description, graduation_year):
     """Flag explicit year differences without deciding whether the user qualifies."""
-    if not graduation_year:
+    if not graduation_year or not GRAD_YEAR_MENTION.search(description):
         return None
     mentions = []
     for item in eligibility_evidence(description, limit=None):

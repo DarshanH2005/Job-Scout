@@ -1489,6 +1489,32 @@ def test_profile_year_flags_jobs_and_can_be_cleared(desk):
     assert result(client.get("/api/state"))["graduation_year"] is None
 
 
+def test_graduation_conflicts_rank_lower_across_pages_without_hiding(desk):
+    client, store = desk
+    company = register(client)
+    with store.connect() as conn:
+        for i in range(30):
+            job = build_job(str(i), "Software Engineer Intern", "", "India", "", "Build APIs.",
+                            f"https://example.com/jobs/{i}")
+            store.upsert_job(conn, company["id"], job, "2026-01-01T00:00:00Z")
+        conflict = build_job("conflict", "Software Engineer Intern", "", "India", "", "Class of 2028",
+                             "https://example.com/jobs/conflict")
+        conflict_id, _ = store.upsert_job(conn, company["id"], conflict, "2026-01-01T00:00:00Z")
+    assert result(client.get("/api/jobs"))["items"][0]["id"] == conflict_id
+    result(client.put("/api/profile", json={"graduation_year":2027}))
+    first = result(client.get("/api/jobs?early_only=true"))
+    second = result(client.get("/api/jobs?early_only=true&offset=30"))
+    assert first["more"] and all(row["id"] != conflict_id for row in first["items"])
+    assert [row["id"] for row in second["items"]] == [conflict_id]
+    assert second["items"][0]["graduation_warning"]["saved_year"] == 2027
+    result(client.patch(f"/api/jobs/{conflict_id}", json={"saved":True}))
+    assert result(client.get("/api/jobs?view=saved"))["items"][0]["id"] == conflict_id
+    result(client.put("/api/profile", json={"graduation_year":2028}))
+    assert result(client.get("/api/jobs"))["items"][0]["id"] == conflict_id
+    result(client.put("/api/profile", json={"graduation_year":None}))
+    assert result(client.get("/api/jobs"))["items"][0]["id"] == conflict_id
+
+
 def test_work_authorization_shows_employer_wording_with_caveats(desk):
     paragraph = "Visa sponsorship: We do sponsor visas! However, we cannot sponsor every role or candidate."
     restriction = "Applicants must be authorized to work in the U.S. F-1 students are eligible with CPT."

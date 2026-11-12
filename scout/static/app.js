@@ -195,7 +195,7 @@ function settings() {
   const {mail,search_configured,search_from_env,rewrite_configured}=S.info;
   return `${head("Settings","Connect optional services for public research and reply checks.")}
   <div class="settings-grid">
-    <section class="panel padded"><h3>Your graduation year</h3><p>Flag postings that explicitly mention a different graduation year. This does not determine eligibility.</p>
+    <section class="panel padded"><h3>Your graduation year</h3><p>Flag postings that explicitly mention a different graduation year and place them lower in the job feed. This does not determine eligibility.</p>
     <form class="form section" data-form="profile"><label>Expected graduation year<input type="number" name="graduation_year" min="2000" max="2100" step="1" value="${E(S.info.graduation_year??"")}" placeholder="For example, 2027"></label>
     <p class="hint">Stored locally. Clear the field to turn off these warnings.</p><div><button class="button">Save year</button></div></form></section>
     <section class="panel padded"><h3>Public contact research</h3><p>Brave searches public sources after you pick a job. Saved contacts and LinkedIn search queries are available immediately.</p>
