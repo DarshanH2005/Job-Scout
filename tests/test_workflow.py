@@ -852,6 +852,87 @@ def test_expired_gmail_authorization_surfaces_reconnect_in_settings(desk, monkey
     assert mail["send_enabled"]
 
 
+def test_feed_normalization_does_not_block_the_event_loop(monkeypatch):
+    import threading
+    from scout import feeds
+    started, release = threading.Event(), threading.Event()
+    original = feeds.normalize
+    def slow_normalize(provider, row):
+        started.set()
+        assert release.wait(3)
+        return original(provider, row)
+    monkeypatch.setattr(feeds, "normalize", slow_normalize)
+    row = {"id":123, "title":"Software Engineer", "absolute_url":"https://example.com/jobs/123",
+           "location":{"name":"India"}, "content":"Build APIs."}
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"jobs":[row]}))) as client:
+            task = asyncio.create_task(fetch_board(client, {"provider":"greenhouse", "board":"sample"}, asyncio.Semaphore(1)))
+            try:
+                assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), 2)
+                assert not task.done()
+            finally:
+                release.set()
+            jobs, error = await task
+            assert error is None and len(jobs) == 1
+    asyncio.run(check())
+
+
+def test_scan_waits_for_active_commit_before_marking_interrupted(monkeypatch):
+    import threading
+    started, release = threading.Event(), threading.Event()
+    events = []
+    class SlowStore:
+        def write(self, sql, params=()):
+            if "SET state=" in sql:
+                events.append(("finished", params[0]))
+        def finish_source(self, scan_id, company, jobs, error, baseline_id):
+            started.set()
+            assert release.wait(3)
+            events.append(("committed", company["name"]))
+    async def fetch(*_):
+        return [], None
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    async def check():
+        scanner = app_module.Scanner(SlowStore())
+        task = asyncio.create_task(scanner.run(1, [{"provider":"greenhouse", "name":"Sample"}], 1))
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1), 2)
+            task.cancel()
+            await asyncio.sleep(.02)
+            assert not task.done() and not events
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert events == [("committed", "Sample"), ("finished", "interrupted")]
+    asyncio.run(check())
+
+
+def test_failed_scan_cancels_unfinished_sources_before_finishing(monkeypatch):
+    events = []
+    class FailingStore:
+        def write(self, sql, params=()):
+            if "SET state=" in sql:
+                events.append(("finished", params[0]))
+        def finish_source(self, *_):
+            raise RuntimeError("Simulated persistence failure")
+    async def fetch(_client, company, _limit):
+        if company["name"] == "Delayed":
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                events.append(("cancelled", "Delayed"))
+                raise
+        return [], None
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    async def check():
+        scanner = app_module.Scanner(FailingStore())
+        await scanner.run(1, [{"provider":"greenhouse", "name":"Failure"},
+                              {"provider":"greenhouse", "name":"Delayed"}], 1)
+        assert events == [("cancelled", "Delayed"), ("finished", "failed")]
+    asyncio.run(check())
+
+
 def test_new_jobs_failure_recovery_and_source_coverage(desk, monkeypatch):
     client, store = desk
     register(client)

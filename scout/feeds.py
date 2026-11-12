@@ -413,6 +413,22 @@ def build_job(external_id, title, department, location, workplace, description, 
                 evidence=evidence[:500], score=score, reason=reason)
 
 
+def normalize_workday_rows(rows, public_base):
+    jobs = []
+    for row in rows:
+        path = workday_path(row["externalPath"])
+        title = clean(row.get("title"))
+        if not title:
+            raise ValueError("Workday returned a posting without a title.")
+        remote = "Remote" if str(row.get("remoteType", "")).casefold() == "remote" else ""
+        jobs.append(build_job(path, title, "", row.get("locationsText"), remote, "", public_base + path))
+    return jobs
+
+
+def normalize_rows(provider, rows):
+    return [job for row in rows if (job := normalize(provider, row))]
+
+
 async def fetch_board(client, company, limit):
     provider = company["provider"]
     async with limit:
@@ -420,14 +436,7 @@ async def fetch_board(client, company, limit):
             if provider == "workday":
                 base, public_base = workday_base(company["board"])
                 rows = await workday_postings(client, base)
-                jobs = []
-                for row in rows:
-                    path = workday_path(row["externalPath"])
-                    title = clean(row.get("title"))
-                    if not title:
-                        raise ValueError("Workday returned a posting without a title.")
-                    remote = "Remote" if str(row.get("remoteType", "")).casefold() == "remote" else ""
-                    jobs.append(build_job(path, title, "", row.get("locationsText"), remote, "", public_base + path))
+                jobs = await asyncio.to_thread(normalize_workday_rows, rows, public_base)
                 # Resolve ambiguous early-career locations first, then relevant India listings.
                 ambiguous = [i for i, job in enumerate(jobs) if job["score"] >= EARLY_SCORE
                              and re.fullmatch(r"\d+\s+locations?", job["location"], re.I)]
@@ -443,8 +452,8 @@ async def fetch_board(client, company, limit):
                             description, location, workplace = await workday_detail(client, company["board"], original["external_id"])
                             if not workplace and original["evidence"] == f'{original["location"]} · Remote':
                                 workplace = "Remote"
-                            jobs[index] = build_job(original["external_id"], original["title"], original["department"],
-                                                    location or original["location"], workplace, description, original["url"])
+                            jobs[index] = await asyncio.to_thread(build_job, original["external_id"], original["title"], original["department"],
+                                                                  location or original["location"], workplace, description, original["url"])
                         except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
                             pass  # Keep the honest, unclear summary; opening the role can retry the detail.
                 await asyncio.gather(*(enrich(index) for index in candidates))
@@ -457,7 +466,7 @@ async def fetch_board(client, company, limit):
                 rows = payload if provider == "lever" else payload["jobs"]
             if not isinstance(rows, list):
                 raise ValueError("The provider returned an unexpected feed format.")
-            jobs = [job for row in rows if (job := normalize(provider, row))]
+            jobs = await asyncio.to_thread(normalize_rows, provider, rows)
             if rows and not jobs and not (provider == "ashby" and all(row.get("isListed") is False for row in rows)):
                 raise ValueError("The feed contained no readable postings.")
             if provider == "smartrecruiters":
@@ -473,9 +482,9 @@ async def fetch_board(client, company, limit):
                             description, workplace = await smartrecruiters_detail(client, company["board"], original["external_id"])
                             if not workplace and original["evidence"] == f'{original["location"]} · Remote':
                                 workplace = "Remote"
-                            jobs[index] = build_job(original["external_id"], original["title"], original["department"],
-                                                    original["location"], workplace, description, original["url"],
-                                                    original["posted_at"], original["apply_url"])
+                            jobs[index] = await asyncio.to_thread(build_job, original["external_id"], original["title"], original["department"],
+                                                                  original["location"], workplace, description, original["url"],
+                                                                  original["posted_at"], original["apply_url"])
                         except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
                             pass  # Preserve the summary when an individual detail is unavailable.
                 await asyncio.gather(*(enrich_smart(i) for i in candidates[:20]))

@@ -197,20 +197,36 @@ class Scanner:
 
     async def run(self, scan_id, companies, baseline_id):
         limits = {provider: asyncio.Semaphore(2 if provider == "workday" else 4) for provider in PROVIDERS}
+        persistence = asyncio.Lock()
         unsupported = len([row for row in companies if row["provider"] not in PROVIDERS])
         self.store.write("UPDATE scans SET unsupported=? WHERE id=?", (unsupported, scan_id))
-        state, note = "completed", ""
+        state, note, tasks = "completed", "", []
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
                 async def check(company):
                     jobs, error = await fetch_board(client, company, limits[company["provider"]])
-                    self.store.finish_source(scan_id, company, jobs, error, baseline_id)
-                await asyncio.gather(*(check(row) for row in companies if row["provider"] in PROVIDERS))
+                    async with persistence:
+                        commit = asyncio.create_task(asyncio.to_thread(self.store.finish_source, scan_id, company, jobs, error, baseline_id))
+                        try:
+                            await asyncio.shield(commit)
+                        except asyncio.CancelledError:
+                            await commit  # Finish the active transaction before marking the scan interrupted.
+                            raise
+                tasks = [asyncio.create_task(check(row)) for row in companies if row["provider"] in PROVIDERS]
+                await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             state, note = "interrupted", "The app closed before the scan finished."
+            for task in tasks:
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             raise
         except Exception:
             state, note = "failed", "The scan stopped early. Check the local server log and retry."
+            for task in tasks:
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             import logging
             logging.exception("Job scan %s stopped", scan_id)
         finally:
