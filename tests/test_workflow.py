@@ -1200,6 +1200,30 @@ def test_experience_ranking_respects_preferred_and_all_required_evidence(desk):
     assert result(client.get(f"/api/jobs/{job['id']}"))["score"] == 55
 
 
+def test_experience_requirements_include_role_wording_and_degree_alternatives(desk):
+    role = "Experience: 3+ years in a Technical Support, Software Engineering, or Technical Analyst role."
+    alternatives = "Bachelors with 8+, Masters with 6+ years, or PhD with 3+ years, of relevant industry experience."
+    mixed = "Bachelors with 3+ years, or Masters with 0+ years, of relevant industry experience."
+    for description in (role, "4+ years in marketing operations, marketing technology engineering.", alternatives):
+        job = build_job("1", "Software Engineer", "", "India", "", description, "https://example.com/1")
+        assert job["score"] == 0
+        assert eligibility_evidence(description)[0]["text"] == description
+    assert build_job("2", "Software Engineer", "", "India", "", mixed, "https://example.com/2")["score"] == 55
+    assert build_job("3", "Software Engineer", "", "India", "", "Preferred qualifications\n" + role, "https://example.com/3")["score"] == 55
+    assert build_job("4", "Software Engineer", "", "India", "", "Our company has 10 years in business.", "https://example.com/4")["score"] == 55
+    assert build_job("5", "Software Engineer 1", "", "India", "", "Up to 3 years in software development.", "https://example.com/5")["score"] == 90
+
+    client, store = desk
+    job = result(client.post("/api/jobs", json={"company":"Example", "title":"Software Engineer",
+                 "url":"https://example.com/saved-experience", "description":role}), 201)
+    result(client.patch(f"/api/jobs/{job['id']}", json={"saved":True}))
+    store.write("UPDATE jobs SET score=55,reason='Old score' WHERE id=?", (job["id"],))
+    store.write("DELETE FROM settings WHERE key='experience_ranking_3'")
+    store.initialize(seed=False)
+    refreshed = result(client.get(f"/api/jobs/{job['id']}"))
+    assert refreshed["score"] == 0 and refreshed["saved"]
+
+
 def test_posting_requirements_take_precedence_over_general_remote_policy():
     boilerplate = "For US-based roles open to remote work, we hire only in certain states."
     office = "Are able to work in our San Francisco office 5 days/week."

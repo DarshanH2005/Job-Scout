@@ -59,6 +59,12 @@ YEARS = re.compile(
     r"(?<![\d.])\b(?P<minimum>\d{1,2})\s*(?:(?:[-–]|to)\s*\d{1,2}|\+|or more)?\s*years?\s+"
     r"(?:of\s+(?:[^\n.!?;:]{0,75}\s+)?experience\b|experience\b|(?:working|building|developing|designing|managing)\b)", re.I
 )
+YEARS_IN_ROLE = re.compile(
+    r"(?<![\d.])\b(?P<minimum>\d{1,2})\s*(?:(?:[-–]|to)\s*\d{1,2}|\+|or more)?\s*years?\s+in\s+"
+    r"(?:a[n]?\s+)?(?:[\w&/-]+[ ,/-]+){0,5}?(?:engineering|operations|technology|development|support|"
+    r"analytics|programming|software|security|data|design|testing|research)\b", re.I
+)
+DEGREE_EXPERIENCE = re.compile(r"\b(?:bachelor'?s?|master'?s?|ph\.?d\.?)\s+with\s+(\d{1,2})\s*\+?", re.I)
 EXPERIENCE_MONTHS = re.compile(r"\b\d{1,2}\s*\+?\s*months?\s+of\s+(?:professional\s+|relevant\s+|industry\s+)?experience\b", re.I)
 EDUCATION = re.compile(
     r"\b(?:(?:currently|must be) (?:pursuing|enrolled(?: in)?) [^.!?;]{0,65}\b(?:degree|program|college|university)"
@@ -245,10 +251,7 @@ def assess(title, department, description, region):
         excerpt = evidence["text"]
         if evidence["label"] in {"Preferred", "Application deadline"} or re.match(r"^(?:preferred|nice to have|bonus|ideally)\b", excerpt, re.I):
             continue
-        for match in YEARS.finditer(excerpt):
-            prefix = excerpt[max(0, match.start() - 30):match.start()]
-            if not re.search(r"\b(?:up to|at most|no more than|less than|maximum of)\s*$", prefix, re.I):
-                experience.append(int(match["minimum"]))
+        experience.extend(experience_minima(excerpt))
     if EARLY.search(title):
         if any(years >= 2 for years in experience):
             minimum = max(experience)
@@ -257,6 +260,20 @@ def assess(title, department, description, region):
     if any(years >= 3 for years in experience):
         return 0, ""
     return 55, "Relevant role. Check the experience requirements."
+
+
+def experience_minima(excerpt):
+    """Find explicit minimums; degree alternatives use the least demanding option."""
+    degree_options = DEGREE_EXPERIENCE.findall(excerpt)
+    if len(degree_options) >= 2 and re.search(r"\byears?\b[^.\n]{0,100}\bexperience\b", excerpt, re.I):
+        return [min(map(int, degree_options))]
+    minima = []
+    for pattern in (YEARS, YEARS_IN_ROLE):
+        for match in pattern.finditer(excerpt):
+            prefix = excerpt[max(0, match.start() - 30):match.start()]
+            if not re.search(r"\b(?:up to|at most|no more than|less than|maximum of)\s*$", prefix, re.I):
+                minima.append(int(match["minimum"]))
+    return minima
 
 
 def eligibility_evidence(description, limit=4):
@@ -280,7 +297,8 @@ def eligibility_evidence(description, limit=4):
             if APPLICATION_DEADLINE.search(excerpt):
                 evidence.append({"label": "Application deadline", "text": excerpt})
                 seen.add(excerpt)
-            elif (YEARS.search(excerpt) or EXPERIENCE_MONTHS.search(excerpt) or EDUCATION.search(excerpt)
+            elif (YEARS.search(excerpt) or YEARS_IN_ROLE.search(excerpt) or experience_minima(excerpt)
+                    or EXPERIENCE_MONTHS.search(excerpt) or EDUCATION.search(excerpt)
                     or (DEGREE.search(excerpt) and GRAD_DATE.search(excerpt)) or GRAD_YEAR_MENTION.search(excerpt)):
                 evidence.append({"label": section, "text": excerpt})
                 seen.add(excerpt)

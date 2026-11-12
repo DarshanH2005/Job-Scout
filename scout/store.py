@@ -163,6 +163,13 @@ class Store:
                     if SENIOR.search(row["title"]):
                         conn.execute("UPDATE jobs SET score=0,reason='' WHERE id=?", (row["id"],))
                 conn.execute("INSERT INTO settings VALUES('senior_title_filter_1','1')")
+            if not conn.execute("SELECT 1 FROM settings WHERE key='experience_ranking_3'").fetchone():
+                rows = conn.execute("SELECT id,title,department,description,region,score FROM jobs WHERE score>0 AND description<>''").fetchall()
+                for row in rows:
+                    score, reason = assess(row["title"], row["department"], row["description"], row["region"])
+                    if score < row["score"]:
+                        conn.execute("UPDATE jobs SET score=?,reason=? WHERE id=?", (score, reason, row["id"]))
+                conn.execute("INSERT INTO settings VALUES('experience_ranking_3','1')")
             if not conn.execute("SELECT 1 FROM settings WHERE key='timezone_evidence_1'").fetchone():
                 rows = conn.execute("SELECT id,evidence,description FROM jobs WHERE description<>''").fetchall()
                 for row in rows:
