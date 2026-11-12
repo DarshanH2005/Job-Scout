@@ -320,18 +320,23 @@ class Gmail:
                 LEFT JOIN gmail_follow_up_schedule f ON f.outreach_id=o.id
                 WHERE o.mail_account=? AND o.thread_id IS NOT NULL AND o.state='waiting'""", (account,))
             replies, issues = 0, 0
+            access_rejected = False
             for item in items:
                 try:
                     thread = await self.thread(token, item["thread_id"])
                 except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code != 404:
-                        raise
                     issues += 1
-                    self.store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE outreach_id=? AND issue=''",
-                                     ("The Gmail thread could not be found. Review it before following up.", item["id"]))
+                    if exc.response.status_code == 404:
+                        self.store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE outreach_id=? AND issue=''",
+                                         ("The Gmail thread could not be found. Review it before following up.", item["id"]))
+                    elif exc.response.status_code in (400, 401, 403):
+                        access_rejected = True
                     continue
-                messages = thread.get("messages")
-                if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
+                except (httpx.RequestError, ValueError):
+                    issues += 1
+                    continue
+                messages = thread.get("messages") if isinstance(thread, dict) else None
+                if not isinstance(messages, list) or not messages or not all(isinstance(message, dict) for message in messages):
                     issues += 1
                     self.store.write("UPDATE gmail_follow_up_schedule SET issue=? WHERE outreach_id=? AND issue=''",
                                      ("Gmail did not return a complete thread. Review it before following up.", item["id"]))
@@ -349,10 +354,21 @@ class Gmail:
                     if reason:
                         self.store.write("UPDATE gmail_follow_up_schedule SET issue=?,review_pending_ids=? WHERE outreach_id=? AND issue=''",
                                          (reason, json.dumps(sorted(pending)), item["id"]))
+            hint_issue = False
             if self.store.setting("linkedin_hints") == "1":
-                await self._linkedin_hints(account, token)
+                try:
+                    await self._linkedin_hints(account, token)
+                except (httpx.HTTPError, ValueError):
+                    hint_issue = True
             self.store.set_setting("gmail_checked_at", now())
-            self.store.set_setting("gmail_issue", f"{issues} linked Gmail threads could not be read." if issues else "")
+            notices = []
+            if issues:
+                notices.append(f"{issues} linked Gmail {'thread' if issues == 1 else 'threads'} could not be checked.")
+            if access_rejected:
+                notices.append("Google rejected access to some threads; check Gmail permissions or reconnect in Settings.")
+            if hint_issue:
+                notices.append("LinkedIn email hints could not be checked.")
+            self.store.set_setting("gmail_issue", " ".join(notices))
             return replies
 
     async def _linkedin_hints(self, account, token):

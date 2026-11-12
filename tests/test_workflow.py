@@ -1362,6 +1362,72 @@ def test_gmail_clears_follow_up_but_linkedin_email_is_a_hint(desk, monkeypatch):
     assert not incoming_reply(message("bounce", 105, "mailer-daemon@example.com", "Undeliverable"), 100, "jane@example.com")
 
 
+@pytest.mark.parametrize("failure", ["not_found", "server_error", "forbidden", "timeout", "invalid_json", "invalid_thread"])
+def test_gmail_checks_other_threads_when_one_fails(desk, monkeypatch, failure):
+    client, store = desk
+    first = action(client, create_draft(client, saved_job(client), "gmail"), "sent")
+    other_job = result(client.post("/api/jobs", json={"company":"Sample Company", "title":"Other role",
+                       "url":"https://sample.example/jobs/other"}), 201)
+    second = action(client, create_draft(client, other_job, "gmail"), "sent")
+    store.set_setting("gmail_account", "me@example.com")
+    for item, thread_id in [(first, "bad"), (second, "good")]:
+        store.write("UPDATE outreach SET thread_id=?,mail_account='me@example.com',mail_anchor=100,mail_peer='jane@example.com' WHERE id=?",
+                    (thread_id, item["id"]))
+    store.write("""INSERT INTO gmail_follow_up_schedule(id,outreach_id,send_at,message,account,recipient,thread_id)
+        VALUES('schedule',?,'2099-01-01T00:00:00Z','Follow up','me@example.com','jane@example.com','good')""", (second["id"],))
+    calls = []
+    fixed = False
+    async def token(_self):
+        return "me@example.com", "fake-token"
+    async def thread(_self, _token, thread_id):
+        calls.append(thread_id)
+        if thread_id == "good":
+            return {"messages":[message("reply", 101, "jane@example.com", "Re: Referral")]}
+        if fixed:
+            return {"messages":[message("sent", 100, "me@example.com", "Referral", labels=["SENT"])]}
+        request = httpx.Request("GET", "https://gmail.googleapis.com/thread")
+        if failure in {"not_found", "server_error", "forbidden"}:
+            status = {"not_found":404, "server_error":503, "forbidden":403}[failure]
+            raise httpx.HTTPStatusError("failed", request=request, response=httpx.Response(status, request=request))
+        if failure == "timeout":
+            raise httpx.ReadTimeout("timeout", request=request)
+        if failure == "invalid_json":
+            raise ValueError("invalid JSON")
+        return None
+    monkeypatch.setattr(Gmail, "token", token)
+    monkeypatch.setattr(Gmail, "thread", thread)
+    assert result(client.post("/api/gmail/check")) == {"replies":1}
+    assert calls == ["bad", "good"]
+    assert "1 linked Gmail thread could not be checked" in store.setting("gmail_issue")
+    assert ("reconnect" in store.setting("gmail_issue")) == (failure == "forbidden")
+    updated = result(client.get(f"/api/outreach/{second['id']}"))
+    assert updated["state"] == "replied" and updated["due_at"] is None and updated["schedule_id"] is None
+    assert result(client.get(f"/api/outreach/{first['id']}"))["state"] == "waiting"
+    fixed = True
+    assert result(client.post("/api/gmail/check")) == {"replies":0}
+    assert store.setting("gmail_issue") == ""
+
+
+def test_linkedin_hint_failure_does_not_discard_gmail_reply_check(desk, monkeypatch):
+    client, store = desk
+    item = action(client, create_draft(client, saved_job(client), "gmail"), "sent")
+    store.set_setting("gmail_account", "me@example.com")
+    store.set_setting("linkedin_hints", "1")
+    store.write("UPDATE outreach SET thread_id='good',mail_account='me@example.com',mail_anchor=100,mail_peer='jane@example.com' WHERE id=?", (item["id"],))
+    async def token(_self):
+        return "me@example.com", "fake-token"
+    async def thread(_self, _token, _id):
+        return {"messages":[message("reply", 101, "jane@example.com", "Re: Referral")]}
+    async def hints(_self, _account, _token):
+        raise httpx.ReadTimeout("unavailable")
+    monkeypatch.setattr(Gmail, "token", token)
+    monkeypatch.setattr(Gmail, "thread", thread)
+    monkeypatch.setattr(Gmail, "_linkedin_hints", hints)
+    assert result(client.post("/api/gmail/check")) == {"replies":1}
+    assert result(client.get(f"/api/outreach/{item['id']}"))["state"] == "replied"
+    assert store.setting("gmail_checked_at") and "LinkedIn email hints" in store.setting("gmail_issue")
+
+
 def test_local_request_guard(desk):
     client, _ = desk
     response = client.post("/api/scans", headers={"Origin": "https://outside.example"})

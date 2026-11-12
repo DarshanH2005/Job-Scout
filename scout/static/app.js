@@ -212,6 +212,7 @@ async function inbox() {
     ["Completed",items.filter(i=>i.inbox_category==="completed")],
   ];
   return `${head("Referral inbox","See who you contacted and which conversations need attention.",S.info.mail.account?B("Check Gmail","mail-check","","primary"):'<a class="button" href="#settings">Set up Gmail</a>')}
+    ${S.info.mail.issue?`<p class="evidence" role="status">${E(S.info.mail.issue)} <a href="#settings">Gmail settings</a></p>`:""}
     ${hints.length?`<section class="section"><h3>Check LinkedIn</h3><div class="panel">${hints.map(h=>`<div class="inbox-row"><div><strong>${E(h.subject)}</strong>
     <span class="micro">Notification email · ${date(h.at,true)} · Open LinkedIn to confirm</span></div><div class="actions">${L("LinkedIn inbox","https://www.linkedin.com/messaging/")}${B("Dismiss","hint-dismiss",h.id,"small")}</div></div>`).join("")}</div></section>`:""}
     ${items.length?groups.filter(([,rows])=>rows.length).map(([name,rows])=>`<section class="section"><h3>${name} <span class="micro">${rows.length}</span></h3>
@@ -641,8 +642,11 @@ async function act(action,id) {
     "forget-google":async()=>{await saveIntegration("google","");},
     "mail-disconnect":async()=>{await api("/gmail/disconnect","POST");await refreshState();await render();notice("Gmail disconnected.");},
     "mail-check":async()=>{
-      try {const result=await api("/gmail/check","POST");notice(result.replies?`${result.replies} Gmail replies detected.`:"Gmail checked.");}
+      let result;
+      try {result=await api("/gmail/check","POST");}
       finally {await refreshState();await render();}
+      const replyNotice=result.replies?`${result.replies} Gmail replies detected.`:"Gmail checked.";
+      notice(S.info.mail.issue?`${replyNotice} ${S.info.mail.issue}`:replyNotice,!!S.info.mail.issue);
     },
     "mail-threads":()=>mailThreads(id),
     "hint-dismiss":async()=>{await api(`/gmail/hints/${encodeURIComponent(id)}/dismiss`,"POST");await render();},
