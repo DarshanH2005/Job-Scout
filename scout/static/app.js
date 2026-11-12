@@ -124,12 +124,12 @@ async function refreshNextActions() {
   try {
     const {applications,referrals}=await api(`/next-actions?today=${today}`);
     if(!target.isConnected||request!==actionsRequest) return;
-    const labels={waiting:"Check for a reply",replied:"Review reply",offered:"Review referral offer",draft:"Review draft"};
+    const labels={delivery:"Check Gmail delivery",schedule_issue:"Review paused schedule",due:"Check for a reply",reply:"Review reply",offer:"Review referral offer",draft:"Review draft"};
     const rows=[
       ...applications.map(job=>`<li><button class="job-title" data-action="job" data-id="${job.id}">${E(job.title)}</button>
         <div class="micro">${E(job.company)} · Target ${date(job.application_target)}${job.archived?" · Absent in recent scans":""}</div></li>`),
       ...referrals.map(item=>`<li><button class="job-title" data-action="conversation" data-id="${item.id}">${E(item.person)} · ${E(item.company)}</button>
-        <div class="micro">${labels[item.state]}${item.due_at?` · Due ${date(item.due_at)}`:""}</div></li>`),
+        <div class="micro">${E(labels[item.inbox_category]||"Review conversation")}${item.inbox_category==="due"&&item.due_at?` · Due ${date(item.due_at)}`:""}</div></li>`),
     ];
     target.innerHTML=rows.length?`<ul class="next-actions-list">${rows.join("")}</ul>`:
       '<p class="micro">No applications due or referrals to review.</p>';
@@ -173,18 +173,24 @@ async function watchlist() {
 
 
 function inboxRow(item) {
+  const status={delivery:"Check Gmail delivery",schedule_issue:"Schedule paused",scheduled:"Scheduled"}[item.inbox_category]||stages[item.state];
+  const timing=item.inbox_category==="delivery"?" · Check Gmail delivery":item.inbox_category==="schedule_issue"?" · Review the paused schedule":
+    item.inbox_category==="scheduled"?` · Sends ${date(item.initial_scheduled_send_at||item.scheduled_send_at,true)}`:
+    item.due_at?` · Check ${date(item.due_at)}`:"";
   return `<div class="inbox-row"><div><strong>${E(item.person)} · ${E(item.company)}</strong>
-    <span class="micro">${E(item.job_title)} · ${channels[item.channel]}${item.gmail_send_pending?" · Check Gmail delivery":item.scheduled_issue?" · Review Gmail thread":item.scheduled_send_at?` · Sends ${date(item.scheduled_send_at,true)}`:item.due_at?` · Check ${date(item.due_at)}`:""}</span></div>
-    <div class="actions">${tag(stages[item.state],item.state==="submitted"?"good":"")}${B("Open","conversation",item.id,"small")}</div></div>`;
+    <span class="micro">${E(item.job_title)} · ${E(channels[item.channel]||item.channel)}${timing}</span></div>
+    <div class="actions">${tag(status,item.inbox_category==="delivery"||item.inbox_category==="schedule_issue"?"warn":item.state==="submitted"?"good":"")}${B("Open","conversation",item.id,"small")}</div></div>`;
 }
 async function inbox() {
-  const {items,hints}=await api("/outreach"), now=new Date();
+  const {items,hints}=await api("/outreach");
   const groups=[
-    ["Check for replies",items.filter(i=>i.state==="waiting"&&new Date(i.due_at)<=now)],
-    ["Needs your action",items.filter(i=>["replied","offered"].includes(i.state))],
-    ["Ready to send",items.filter(i=>i.state==="draft")],
-    ["Waiting",items.filter(i=>i.state==="waiting"&&new Date(i.due_at)>now)],
-    ["Completed",items.filter(i=>["submitted","closed"].includes(i.state))],
+    ["Needs review",items.filter(i=>["delivery","schedule_issue"].includes(i.inbox_category))],
+    ["Check for replies",items.filter(i=>i.inbox_category==="due")],
+    ["Needs your action",items.filter(i=>["reply","offer"].includes(i.inbox_category))],
+    ["Scheduled",items.filter(i=>i.inbox_category==="scheduled").sort((a,b)=>new Date(a.initial_scheduled_send_at||a.scheduled_send_at)-new Date(b.initial_scheduled_send_at||b.scheduled_send_at))],
+    ["Ready to send",items.filter(i=>i.inbox_category==="draft")],
+    ["Waiting",items.filter(i=>i.inbox_category==="waiting")],
+    ["Completed",items.filter(i=>i.inbox_category==="completed")],
   ];
   return `${head("Referral inbox","See who you contacted and which conversations need attention.",S.info.mail.account?B("Check Gmail","mail-check","","primary"):'<a class="button" href="#settings">Set up Gmail</a>')}
     ${hints.length?`<section class="section"><h3>Check LinkedIn</h3><div class="panel">${hints.map(h=>`<div class="inbox-row"><div><strong>${E(h.subject)}</strong>

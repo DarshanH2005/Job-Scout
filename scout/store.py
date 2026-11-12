@@ -90,7 +90,16 @@ SELECT o.*, c.name AS person, c.source, c.profile_url, c.email, j.title AS job_t
        s.account AS initial_scheduled_account, s.recipient AS initial_scheduled_recipient,
        s.job_title AS initial_scheduled_job_title, s.job_url AS initial_scheduled_job_url,
        s.auto_text AS initial_scheduled_auto_text, s.auto_days AS initial_scheduled_auto_days,
-       s.issue AS initial_scheduled_issue, j.archived AS job_archived, co.status AS job_source_status
+       s.issue AS initial_scheduled_issue, j.archived AS job_archived, co.status AS job_source_status,
+       CASE WHEN o.state IN ('closed','submitted') THEN 'completed'
+            WHEN o.gmail_send_pending<>'' THEN 'delivery'
+            WHEN coalesce(s.issue,'')<>'' OR coalesce(f.issue,'')<>'' THEN 'schedule_issue'
+            WHEN o.state='replied' THEN 'reply'
+            WHEN o.state='offered' THEN 'offer'
+            WHEN s.id IS NOT NULL OR f.id IS NOT NULL THEN 'scheduled'
+            WHEN o.state='draft' THEN 'draft'
+            WHEN o.state='waiting' AND o.due_at IS NOT NULL AND julianday(o.due_at)<=julianday('now') THEN 'due'
+            ELSE 'waiting' END AS inbox_category
 FROM outreach o JOIN contacts c ON c.id=o.contact_id JOIN jobs j ON j.id=o.job_id
 JOIN companies co ON co.id=j.company_id
 LEFT JOIN gmail_follow_up_schedule f ON f.outreach_id=o.id
@@ -250,7 +259,7 @@ class Store:
         return int(value) if value.isdecimal() and 2000 <= int(value) <= 2100 else None
 
     def stats(self):
-        return self.one("""
+        stats = self.one("""
             SELECT
             (SELECT COUNT(*) FROM companies) AS companies,
             (SELECT COUNT(*) FROM companies WHERE enabled AND provider<>'') AS configured,
@@ -259,9 +268,10 @@ class Store:
             (SELECT COUNT(*) FROM jobs j JOIN companies c ON c.id=j.company_id
               WHERE j.archived=0 AND j.hidden=0 AND j.score>0 AND (c.enabled=1 OR j.manual=1)) AS matches,
             (SELECT COUNT(*) FROM jobs WHERE saved=1 OR applied_at IS NOT NULL) AS saved,
-            (SELECT COUNT(*) FROM jobs WHERE hidden=1) AS hidden,
-            (SELECT COUNT(*) FROM outreach WHERE state='waiting' AND due_at<=?) AS due
-        """, (now(),))
+            (SELECT COUNT(*) FROM jobs WHERE hidden=1) AS hidden
+        """)
+        stats["due"] = self.one(f"SELECT count(*) AS count FROM ({OUTREACH_SELECT}) WHERE inbox_category IN ('delivery','schedule_issue','due')")["count"]
+        return stats
 
     def last_full_scan(self):
         return self.one("SELECT * FROM scans WHERE scope='full' AND state='completed' ORDER BY id DESC LIMIT 1")
@@ -384,12 +394,10 @@ class Store:
             FROM jobs j JOIN companies c ON c.id=j.company_id
             WHERE j.saved=1 AND j.applied_at IS NULL AND j.application_target<=?
             ORDER BY j.application_target, j.id LIMIT 3""", (today,))
-        referrals = self.all("""SELECT o.id, o.state, o.due_at, c.name AS person, co.name AS company
-            FROM outreach o JOIN contacts c ON c.id=o.contact_id
-            JOIN jobs j ON j.id=o.job_id JOIN companies co ON co.id=j.company_id
-            WHERE (o.state='waiting' AND o.due_at<=?) OR o.state IN ('replied','offered','draft')
-            ORDER BY CASE o.state WHEN 'waiting' THEN 0 WHEN 'replied' THEN 1 WHEN 'offered' THEN 2 ELSE 3 END,
-                     o.due_at, o.id DESC LIMIT 3""", (now(),))
+        referrals = self.all(f"""SELECT id,state,due_at,person,company,inbox_category FROM ({OUTREACH_SELECT})
+            WHERE inbox_category IN ('delivery','schedule_issue','due','reply','offer','draft')
+            ORDER BY CASE inbox_category WHEN 'delivery' THEN 0 WHEN 'schedule_issue' THEN 1 WHEN 'due' THEN 2
+                     WHEN 'reply' THEN 3 WHEN 'offer' THEN 4 ELSE 5 END, due_at, id DESC LIMIT 3""")
         return {"applications": applications, "referrals": referrals}
 
     def outreach(self, item_id):

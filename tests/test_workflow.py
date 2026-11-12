@@ -1816,6 +1816,38 @@ def test_application_targets_prioritize_outstanding_saved_jobs(desk):
     assert cleared["application_target"] is None and cleared["saved"] and cleared["deadline_at"]
 
 
+def test_inbox_distinguishes_queued_and_paused_automatic_messages(desk):
+    client, store = desk
+    def draft(index):
+        job = result(client.post("/api/jobs", json={"company":"Example", "title":f"Software Engineer {index}",
+                     "url":f"https://example.com/jobs/{index}"}), 201)
+        return create_draft(client, job, "gmail")
+    queued_first, paused_first = draft(1), draft(2)
+    queued_follow = action(client, draft(3), "sent")
+    paused_follow = action(client, draft(4), "sent")
+    uncertain, due, plain = draft(5), action(client, draft(6), "sent"), draft(7)
+    for item, issue in [(queued_first, ""), (paused_first, "Recipient changed.")]:
+        store.write("""INSERT INTO gmail_initial_schedule(id,outreach_id,send_at,message,account,recipient,job_title,job_url,issue)
+            VALUES(?,?,'2099-01-01T00:00:00Z','Request','me@example.com','jane@example.com','Role','https://example.com',?)""",
+            (f"initial-{item['id']}", item["id"], issue))
+    for item, issue in [(queued_follow, ""), (paused_follow, "Thread needs review.")]:
+        store.write("""INSERT INTO gmail_follow_up_schedule(id,outreach_id,send_at,message,account,recipient,thread_id,issue)
+            VALUES(?,?,'2099-01-01T00:00:00Z','Reminder','me@example.com','jane@example.com','thread',?)""",
+            (f"follow-{item['id']}", item["id"], issue))
+        store.write("UPDATE outreach SET due_at='2000-01-01T00:00:00Z' WHERE id=?", (item["id"],))
+    store.write("UPDATE outreach SET gmail_send_pending='2000-01-01T00:00:00Z' WHERE id=?", (uncertain["id"],))
+    store.write("UPDATE outreach SET due_at='2000-01-01T00:00:00Z' WHERE id=?", (due["id"],))
+    rows = {item["id"]:item for item in result(client.get("/api/outreach"))["items"]}
+    assert rows[queued_first["id"]]["inbox_category"] == rows[queued_follow["id"]]["inbox_category"] == "scheduled"
+    assert rows[paused_first["id"]]["inbox_category"] == rows[paused_follow["id"]]["inbox_category"] == "schedule_issue"
+    assert rows[uncertain["id"]]["inbox_category"] == "delivery"
+    assert rows[due["id"]]["inbox_category"] == "due" and rows[plain["id"]]["inbox_category"] == "draft"
+    actions = result(client.get("/api/next-actions?today=2000-01-01"))["referrals"]
+    assert [item["inbox_category"] for item in actions] == ["delivery", "schedule_issue", "schedule_issue"]
+    assert not {queued_first["id"], queued_follow["id"]} & {item["id"] for item in actions}
+    assert result(client.get("/api/state"))["stats"]["due"] == 4
+
+
 def test_next_actions_include_due_targets_and_actionable_referrals(desk):
     client, store = desk
     due = saved_job(client)
