@@ -6,6 +6,8 @@ Job Scout is a private Windows web app for scanning company career feeds, saving
 
 Open **Launch Job Scout.cmd**. It installs the Python dependencies on the first run and opens [Job Scout on this computer](http://127.0.0.1:8765/). Keep the server window open while using the app. Press Ctrl+C there to stop it. If the browser stays closed, open the link above. The launcher uses uv when installed and otherwise needs Python 3.11 or newer.
 
+In **Settings → Start with Windows**, you can start Job Scout quietly at your next Windows sign-in. This per-user option allows enabled daily scans and scheduled Gmail messages to run while the computer is awake and you are signed in. It does not run while the computer is asleep, off or you are signed out. Disable it in Job Scout; Windows startup settings can also disable the entry. The background launcher uses cached dependencies; if it cannot start, open **Launch Job Scout.cmd** to repair the environment.
+
 The SQLite file is stored at **%LOCALAPPDATA%\JobScout\scout.sqlite3**. Close the app before copying it for backup. The source folder can be moved without moving your database.
 
 ## Find jobs and ask for referrals

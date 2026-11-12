@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import AwareDatetime, BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import credentials
+from . import autostart, credentials
 from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, graduation_warning, public_url, smartrecruiters_detail, work_authorization_evidence, workday_base, workday_detail, workday_path
 from .gmail import Gmail, REVIEWABLE_ISSUES, headers, incoming_reply, parse_reviewed_ids, reviewable_message_ids, thread_review_snapshot
 from .research import ResearchCache, find_people, rewrite
@@ -385,6 +385,7 @@ def create_app(db_path=None, seed=True):
                 "graduation_year": store.graduation_year(),
                 "auto_scan": {"enabled": store.setting("automatic_scan") == "1", "next_at": automatic_scan_due(store),
                               "available": bool(getattr(app.state, "automatic_scans", None) and not app.state.automatic_scans.done())},
+                "startup": autostart.status(),
                 "search_configured": bool(credentials.brave_key()),
                 "search_from_env": bool(os.getenv("SCOUT_BRAVE_KEY")),
                 "rewrite_configured": bool(os.getenv("SCOUT_OPENAI_KEY") and os.getenv("SCOUT_OPENAI_MODEL")),
@@ -407,6 +408,15 @@ def create_app(db_path=None, seed=True):
             fail("Automatic scans are unavailable. Restart Job Scout before enabling them.", 409)
         store.set_setting("automatic_scan", "1" if data.enabled else "")
         return {"enabled": data.enabled, "next_at": automatic_scan_due(store)}
+
+    @app.put("/api/windows-startup")
+    async def update_windows_startup(data: AutomaticScan):
+        try:
+            return autostart.set_enabled(data.enabled)
+        except ValueError as exc:
+            fail(str(exc), 409)
+        except OSError:
+            fail("Windows did not allow the startup setting to be changed.", 409)
 
     @app.put("/api/integrations/{name}")
     async def configure_integration(name: str, data: IntegrationInput):

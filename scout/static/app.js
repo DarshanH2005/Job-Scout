@@ -218,13 +218,17 @@ async function inbox() {
     <div class="panel">${rows.map(inboxRow).join("")}</div></section>`).join(""):empty("No conversations yet","Open a job, find someone to ask, and prepare a draft.",'<a href="#jobs">Browse the job feed →</a>')}`;
 }
 function settings() {
-  const {mail,search_configured,search_from_env,rewrite_configured,auto_scan}=S.info;
+  const {mail,search_configured,search_from_env,rewrite_configured,auto_scan,startup}=S.info;
   return `${head("Settings","Connect optional services for public research and reply checks.")}
   <div class="settings-grid">
     <section class="panel padded"><h3>Automatic job scans</h3><p>Check the watchlist every 24 hours while Job Scout runs. If it was closed when a scan was due, it checks after reopening. Scans use no AI tokens.</p>
     <form class="form section" data-form="scan-schedule"><label class="checklabel"><input type="checkbox" name="enabled" ${auto_scan?.enabled?"checked":""} ${auto_scan?.available?"":"disabled"}> Automatically find jobs daily</label>
     ${auto_scan?.enabled?`<p class="hint">Next check ${date(auto_scan.next_at,true)}. An interrupted scan is retried after an hour.</p>`:""}
     ${auto_scan?.available?"":'<p class="evidence">Automatic scans are unavailable. Restart Job Scout and check the server log.</p>'}<div><button class="button">Save scan schedule</button></div></form></section>
+    <section class="panel padded"><h3>Start with Windows</h3><p>Start Job Scout quietly when you sign in, so daily scans and any scheduled Gmail messages can run while your computer is awake.</p>
+    <form class="form section" data-form="startup"><label class="checklabel"><input type="checkbox" name="enabled" ${startup?.enabled?"checked":""} ${startup?.available&&!startup?.conflict?"":"disabled"}> Start Job Scout at Windows sign-in</label>
+    ${startup?.conflict?'<p class="evidence">A different Job Scout startup entry exists. Review it in Windows startup settings.</p>':!startup?.available?'<p class="hint">Windows sign-in startup is unavailable on this system.</p>':""}
+    <p class="hint">This does not run while the computer is asleep, off, or signed out. Windows startup settings can also disable this entry.</p><div><button class="button" ${startup?.available&&!startup?.conflict?"":"disabled"}>Save startup setting</button></div></form></section>
     <section class="panel padded"><h3>Your graduation year</h3><p>Flag postings that explicitly mention a different graduation year and place them lower in the job feed. This does not determine eligibility.</p>
     <form class="form section" data-form="profile"><label>Expected graduation year<input type="number" name="graduation_year" min="2000" max="2100" step="1" value="${E(S.info.graduation_year??"")}" placeholder="For example, 2027"></label>
     <p class="hint">Stored locally. Clear the field to turn off these warnings.</p><div><button class="button">Save year</button></div></form></section>
@@ -662,6 +666,10 @@ document.addEventListener("submit",event=>{
       case "scan-schedule":
         await api("/scan-schedule","PUT",{enabled:data.enabled==="on"});
         await refreshState();await render();notice("Scan schedule updated.");
+        break;
+      case "startup":
+        await api("/windows-startup","PUT",{enabled:data.enabled==="on"});
+        await refreshState();await render();notice("Windows startup setting updated.");
         break;
       case "brave":
         await saveIntegration("brave",data.value);

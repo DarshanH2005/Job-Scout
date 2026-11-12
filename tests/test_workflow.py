@@ -863,6 +863,20 @@ def test_expired_gmail_authorization_surfaces_reconnect_in_settings(desk, monkey
     assert mail["send_enabled"]
 
 
+def test_windows_startup_setting_uses_the_startup_helper(desk, monkeypatch):
+    client, _ = desk
+    state = {"available":True, "enabled":False, "conflict":False}
+    monkeypatch.setattr(app_module.autostart, "status", lambda: dict(state))
+    def set_enabled(value):
+        state["enabled"] = value
+        return dict(state)
+    monkeypatch.setattr(app_module.autostart, "set_enabled", set_enabled)
+    assert not result(client.get("/api/state"))["startup"]["enabled"]
+    assert result(client.put("/api/windows-startup", json={"enabled":True}))["enabled"]
+    assert result(client.get("/api/state"))["startup"]["enabled"]
+    assert not result(client.put("/api/windows-startup", json={"enabled":False}))["enabled"]
+
+
 def test_daily_scan_schedule_uses_full_scan_and_retries_failures(tmp_path):
     store = Store(tmp_path / "daily-due.sqlite3")
     store.initialize(seed=False)
