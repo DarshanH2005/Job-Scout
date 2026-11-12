@@ -1135,6 +1135,33 @@ def test_workday_source_migration_preserves_customized_company(tmp_path):
         "provider":"", "url":"https://custom.example/jobs"}
 
 
+def test_people_and_new_drafts_show_prior_sent_conversations(desk, monkeypatch):
+    client, _ = desk
+    monkeypatch.setattr("scout.research.brave_key", lambda: "")
+    first = saved_job(client)
+    prior = create_draft(client, first)
+    second = result(client.post("/api/jobs", json={"company":"Sample Company", "title":"Software Engineer Intern",
+                    "url":"https://sample.example/careers/13", "location":"India"}), 201)
+    before = result(client.get(f"/api/jobs/{second['id']}/people"))["people"]
+    assert before[0]["prior_conversations"] == []  # A draft is not a sent conversation.
+    prior = action(client, prior, "sent")
+    people = result(client.get(f"/api/jobs/{second['id']}/people"))["people"]
+    assert people[0]["name"] == "Jane Example"
+    assert people[0]["prior_conversations"] == [{"id":prior["id"], "job_title":first["title"],
+                                                 "channel":"linkedin", "state":"waiting", "sent_at":prior["sent_at"]}]
+    assert result(client.get(f"/api/jobs/{first['id']}/people"))["people"][0]["prior_conversations"] == []
+    new_draft = create_draft(client, second, "gmail")
+    assert new_draft["prior_conversations"][0]["id"] == prior["id"]
+    assert result(client.get(f"/api/outreach/{prior['id']}"))["prior_conversations"] == []
+    same_job_other_channel = create_draft(client, first, "gmail")
+    assert same_job_other_channel["prior_conversations"][0]["id"] == prior["id"]
+    action(client, prior, "closed")
+    assert result(client.get(f"/api/outreach/{new_draft['id']}"))["prior_conversations"][0]["state"] == "closed"
+    other_company = result(client.post("/api/jobs", json={"company":"Other Company", "title":"Software Engineer",
+                           "url":"https://other.example/job"}), 201)
+    assert create_draft(client, other_company)["prior_conversations"] == []
+
+
 def test_shortlist_experience_and_posting_age(desk):
     client, store = desk
     junior = saved_job(client)

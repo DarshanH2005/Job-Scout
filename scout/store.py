@@ -350,6 +350,14 @@ class Store:
     def inbox(self):
         return self.all(OUTREACH_SELECT + " ORDER BY CASE WHEN o.state='waiting' THEN o.due_at END ASC NULLS LAST, o.id DESC")
 
+    def contact_conversations(self, contact_id, *, exclude_id=None, exclude_job_id=None):
+        return self.all("""SELECT o.id, o.channel, o.state, o.sent_at, j.title AS job_title
+            FROM outreach o JOIN jobs j ON j.id=o.job_id
+            WHERE o.contact_id=? AND o.sent_at IS NOT NULL
+              AND (? IS NULL OR o.id<>?) AND (? IS NULL OR o.job_id<>?)
+            ORDER BY o.sent_at DESC, o.id DESC LIMIT 5""",
+            (contact_id, exclude_id, exclude_id, exclude_job_id, exclude_job_id))
+
     def next_actions(self, today):
         applications = self.all("""SELECT j.id, j.title, j.application_target, j.archived, c.name AS company
             FROM jobs j JOIN companies c ON c.id=j.company_id
@@ -367,6 +375,7 @@ class Store:
         row = self.one(OUTREACH_SELECT + " WHERE o.id=?", (item_id,))
         if row:
             row["events"] = self.all("SELECT kind,at,note,message FROM events WHERE outreach_id=? ORDER BY id DESC", (item_id,))
+            row["prior_conversations"] = self.contact_conversations(row["contact_id"], exclude_id=item_id)
         return row
 
 

@@ -390,6 +390,9 @@ async def find_people(store, job, cache=None):
                         status = "official"
         except (httpx.HTTPError, ElementTree.ParseError, ValueError):
             pass
+    for person in people:
+        if person.get("id"):
+            person["prior_conversations"] = store.contact_conversations(person["id"], exclude_job_id=job["id"])
     return {"people": people, "query": query, "status": status, "official_cached": official_cached}
 
 

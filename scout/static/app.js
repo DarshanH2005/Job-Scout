@@ -323,6 +323,12 @@ async function verifyJob(id) {
     throw error;
   }
 }
+function priorConversations(items, action) {
+  if(!items?.length) return "";
+  return `<div class="evidence"><strong>Previously contacted</strong><p class="hint">Review your existing conversation before sending another request to this person.</p>
+    ${items.map(item=>`<div class="inbox-row"><div><strong>${E(item.job_title)}</strong><span class="micro">${E(channels[item.channel]||item.channel)} · Recorded sent ${date(item.sent_at)} · ${E(stages[item.state]||item.state)}</span></div>
+      ${B("Open conversation",action,item.id,"small")}</div>`).join("")}</div>`;
+}
 async function findPeople(id) {
   const target=$("#people");
   target.textContent="Looking for saved contacts and public evidence…";
@@ -339,6 +345,7 @@ async function findPeople(id) {
       const profile=linkedinProfile(p.profile_url);
       const personSearch=`https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(`${p.name} ${S.job.company}`)}`;
       return `<div class="person"><strong>${E(p.name)}</strong><p>${E(p.title)}</p><p>${E(p.reason)}</p><p>${E(p.notes)}</p>
+      ${priorConversations(p.prior_conversations,"job-conversation")}
       <div class="actions">${L(profile?"Open LinkedIn profile":"Find person on LinkedIn",profile||personSearch)}${p.source?L("View source",p.source):""}${action}</div></div>`;
     }).join("")}
     ${hint?`<p class="hint">${E(hint)}</p>`:""}${result.official_cached?'<p class="hint">Public employer sources were checked within the last 15 minutes.</p>':""}<div class="actions">
@@ -403,6 +410,7 @@ function showConversation() {
   const event=(label,action,style="small")=>B(label,`event-${action}`,i.id,style);
   dialog(i.person,`${i.company} · ${channels[i.channel]} · ${stages[i.state]}`,`<p class="micro">${E(i.job_title)}${i.due_at?` · Next check ${date(i.due_at)}`:""}</p>
     ${S.returnJob?`<div class="actions">${B("Back to job","job",S.returnJob,"small")}</div>`:""}
+    ${i.state==="draft"?priorConversations(i.prior_conversations,"prior-conversation"):""}
     <div class="actions" id="handoff-links">${handoffLinks(i)}</div>
     ${i.gmail_send_pending?`<p class="evidence">Gmail delivery is unconfirmed. Check Gmail Sent before recording the send here.</p>`:""}
     ${["linkedin","gmail"].includes(i.channel)?`<details class="section"><summary>Edit ${i.channel==="linkedin"?"LinkedIn profile":"Gmail recipient"}</summary>
@@ -547,7 +555,7 @@ async function act(action,id) {
     "toggle-hidden":()=>{S.hidden=!S.hidden;S.offset=0;return render();},
     save:()=>jobFlag(id,"save"),apply:()=>jobFlag(id,"apply"),hide:()=>jobFlag(id,"hide"),"job-back":showJob,find:()=>findPeople(id),
     person:()=>person(id===""?-1:Number(id)),conversation:()=>openConversation(id),
-    "job-conversation":()=>openConversation(id,S.job.id),"verify-job":()=>verifyJob(id),
+    "job-conversation":()=>openConversation(id,S.job.id),"prior-conversation":()=>openConversation(id,S.returnJob),"verify-job":()=>verifyJob(id),
     "copy-query":()=>copy(S.query),"copy-message":()=>copy($("#draft-text").value),
     "copy-follow-up":()=>copy($("#follow-up-text").value),
     rewrite:async()=>{
