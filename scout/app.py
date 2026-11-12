@@ -89,6 +89,12 @@ class ConversationLink(BaseModel):
 class ContactHandoff(BaseModel):
     profile_url: str | None = Field(default=None, max_length=1800)
     email: str | None = Field(default=None, max_length=254)
+    email_source: str | None = Field(default=None, max_length=1800)
+
+
+class ContactEmail(BaseModel):
+    email: str = Field(max_length=254)
+    email_source: str = Field(default="", max_length=1800)
 
 
 class OutreachEvent(BaseModel):
@@ -155,6 +161,23 @@ def after(days):
 
 def required_url(value):
     return public_url(value) or fail("Enter a valid http or https URL.")
+
+
+def set_contact_email(conn, contact_id, email=None, source=None):
+    contact = conn.execute("SELECT email,email_source FROM contacts WHERE id=?", (contact_id,)).fetchone()
+    if not contact:
+        fail("Contact not found.", 404)
+    address = contact["email"] if email is None else email.strip()
+    if address and not re.fullmatch(r"[^\s@<>,;]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}", address):
+        fail("Enter one valid email address.")
+    evidence = contact["email_source"] if source is None else source.strip()
+    if source is None and address.casefold() != contact["email"].casefold():
+        evidence = ""
+    if evidence:
+        if not address:
+            fail("Add an email address before saving its source.")
+        evidence = required_url(evidence)
+    conn.execute("UPDATE contacts SET email=?,email_source=? WHERE id=?", (address, evidence, contact_id))
 
 
 def job_or_404(store, job_id):
@@ -646,6 +669,14 @@ def create_app(db_path=None, seed=True):
                                    (job["company_id"], name)).fetchone()
         return dict(contact)
 
+    @app.patch("/api/contacts/{contact_id}/email")
+    async def save_contact_email(contact_id: int, data: ContactEmail):
+        with store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            set_contact_email(conn, contact_id, data.email, data.email_source)
+            contact = conn.execute("SELECT * FROM contacts WHERE id=?", (contact_id,)).fetchone()
+        return dict(contact)
+
     @app.post("/api/jobs/{job_id}/draft", status_code=201)
     async def draft(job_id: int, data: DraftInput):
         job = job_or_404(store, job_id)
@@ -718,7 +749,6 @@ def create_app(db_path=None, seed=True):
     async def save_contact_handoff(item_id: int, data: ContactHandoff):
         item = store.outreach(item_id) or fail("Conversation not found.", 404)
         profile = None if data.profile_url is None else data.profile_url.strip()
-        email = None if data.email is None else data.email.strip()
         if profile:
             required_url(profile)
             parsed = urlsplit(profile)
@@ -726,12 +756,12 @@ def create_app(db_path=None, seed=True):
             if (parsed.scheme != "https" or not (host == "linkedin.com" or host.endswith(".linkedin.com"))
                     or not re.fullmatch(r"/in/[^/]+/?", parsed.path)):
                 fail("Enter a LinkedIn profile URL, such as https://www.linkedin.com/in/name/.")
-        if email and not re.fullmatch(r"[^\s@<>,;]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}", email):
-            fail("Enter one valid email address.")
-        store.write(
-            "UPDATE contacts SET profile_url=COALESCE(?,profile_url), email=COALESCE(?,email) WHERE id=?",
-            (profile, email, item["contact_id"]),
-        )
+        with store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if data.email is not None or data.email_source is not None:
+                set_contact_email(conn, item["contact_id"], data.email, data.email_source)
+            if profile is not None:
+                conn.execute("UPDATE contacts SET profile_url=? WHERE id=?", (profile, item["contact_id"]))
         return store.outreach(item_id)
 
     @app.post("/api/outreach/{item_id}/events")

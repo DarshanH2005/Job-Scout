@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id),
     name TEXT NOT NULL COLLATE NOCASE, title TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
-    profile_url TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '',
+    profile_url TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', email_source TEXT NOT NULL DEFAULT '',
     UNIQUE(company_id, name)
 );
 CREATE TABLE IF NOT EXISTS outreach (
@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 JOB_FIELDS = ("external_id", "title", "department", "location", "description", "url", "apply_url",
               "canonical_url", "posted_at", "deadline_at", "region", "evidence", "score", "reason")
 OUTREACH_SELECT = """
-SELECT o.*, c.name AS person, c.source, c.profile_url, c.email, j.title AS job_title, j.url AS job_url,
+SELECT o.*, c.name AS person, c.source, c.profile_url, c.email, c.email_source, j.title AS job_title, j.url AS job_url,
        j.applied_at, co.name AS company, f.id AS schedule_id, f.send_at AS scheduled_send_at,
        f.message AS scheduled_message, f.issue AS scheduled_issue, f.reviewed_message_ids AS scheduled_reviewed_message_ids,
        f.review_pending_ids AS scheduled_review_pending_ids,
@@ -159,6 +159,8 @@ class Store:
                 conn.execute("ALTER TABLE contacts ADD COLUMN profile_url TEXT NOT NULL DEFAULT ''")
             if "email" not in contact_columns:
                 conn.execute("ALTER TABLE contacts ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+            if "email_source" not in contact_columns:
+                conn.execute("ALTER TABLE contacts ADD COLUMN email_source TEXT NOT NULL DEFAULT ''")
             if not any(row["name"] == "message" for row in conn.execute("PRAGMA table_info(events)")):
                 conn.execute("ALTER TABLE events ADD COLUMN message TEXT NOT NULL DEFAULT ''")
             if not conn.execute("SELECT 1 FROM settings WHERE key='experience_ranking_1'").fetchone():

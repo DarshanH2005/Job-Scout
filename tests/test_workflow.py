@@ -1832,6 +1832,40 @@ def test_conversation_link_is_separate_from_contact_source_and_draft(desk):
     assert result(client.patch(path + "/conversation-link", json={"url": ""}))["conversation_url"] == ""
 
 
+def test_contact_email_keeps_evidence_and_clears_it_when_address_changes(desk, monkeypatch):
+    client, store = desk
+    monkeypatch.setattr("scout.research.brave_key", lambda: "")
+    job = saved_job(client)
+    contact = result(client.post(f"/api/jobs/{job['id']}/contacts", json={"name":"Alex Example"}), 201)
+    path = f"/api/contacts/{contact['id']}/email"
+    source = "https://example.com/paper.pdf"
+    result(client.patch(path, json={"email":"alex@example.com", "email_source":source}))
+    result(client.patch(path, json={"email":"", "email_source":source}), 400)
+    result(client.patch(path, json={"email":"alex@example.com", "email_source":"javascript:bad"}), 400)
+    result(client.patch("/api/contacts/999999/email", json={"email":"alex@example.com"}), 404)
+    person = result(client.get(f"/api/jobs/{job['id']}/people"))["people"][0]
+    assert (person["email"],person["email_source"]) == ("alex@example.com",source)
+    item = result(client.post(f"/api/jobs/{job['id']}/draft", json={"contact":{"name":"Alex Example"},"channel":"gmail"}), 201)
+    assert item["email_source"] == source
+    handoff = f"/api/outreach/{item['id']}/contact-handoff"
+    assert result(client.patch(handoff, json={"email":"ALEX@example.com"}))["email_source"] == source
+    changed = result(client.patch(handoff, json={"email":"new@example.com"}))
+    assert changed["email"] == "new@example.com" and changed["email_source"] == ""
+    result(client.patch(handoff, json={"email":"", "email_source":""}))
+    assert store.one("SELECT email,email_source FROM contacts WHERE id=?", (contact["id"],)) == {"email":"", "email_source":""}
+
+
+def test_email_source_migration_keeps_existing_contact(desk):
+    client, store = desk
+    job = saved_job(client)
+    contact = result(client.post(f"/api/jobs/{job['id']}/contacts", json={"name":"Alex Example"}), 201)
+    store.write("UPDATE contacts SET email='alex@example.com' WHERE id=?", (contact["id"],))
+    store.write("ALTER TABLE contacts DROP COLUMN email_source")
+    store.initialize(seed=False)
+    assert store.one("SELECT email,email_source FROM contacts WHERE id=?", (contact["id"],)) == {
+        "email":"alex@example.com", "email_source":""}
+
+
 def test_contact_handoff_keeps_source_and_send_state(desk):
     client, _ = desk
     item = create_draft(client, saved_job(client))

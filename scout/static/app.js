@@ -379,8 +379,9 @@ async function findPeople(id) {
       const profile=linkedinProfile(p.profile_url);
       const personSearch=`https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(`${p.name} ${S.job.company}`)}`;
       return `<div class="person"><strong>${E(p.name)}</strong><p>${E(p.title)}</p><p>${E(p.reason)}</p><p>${E(p.notes)}</p>
+      ${p.email?`<p class="micro">Email: ${E(p.email)}${p.email_source?" · Source saved":" · No source saved"}</p>`:""}
       ${priorConversations(p.prior_conversations,"job-conversation")}
-      <div class="actions">${L(profile?"Open LinkedIn profile":"Find person on LinkedIn",profile||personSearch)}${p.source?L("View source",p.source):""}${action}</div></div>`;
+      <div class="actions">${L(profile?"Open LinkedIn profile":"Find person on LinkedIn",profile||personSearch)}${p.source?L("View source",p.source):""}${p.email_source?L("Email source",p.email_source):""}${p.id?B("Edit email","contact-email",p.id,"small"):""}${action}</div></div>`;
     }).join("")}
     ${hint?`<p class="hint">${E(hint)}</p>`:""}${result.official_cached?'<p class="hint">Public employer sources were checked within the last 15 minutes.</p>':""}<div class="actions">
     ${L("Search LinkedIn",`https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(S.query)}`)}${B("Copy search query","copy-query","","small")}</div>`;
@@ -396,6 +397,15 @@ function person(index) {
     <label>Channel<select name="channel">${select(channels)}</select></label>
     <label>One relevant fact about you <span class="hint">Optional. For example, “I built a Python and SQL pipeline for a student project.”</span><input name="evidence" maxlength="350"></label>
     <div class="actions"><button class="button primary">Prepare draft</button><button class="button" type="submit" data-save-only="true">Save person for later</button>${B("Back to job","job-back")}</div></form>`);
+}
+function contactEmail(id) {
+  const p=S.people.find(person=>String(person.id)===String(id));
+  if(!p) return;
+  dialog("Contact email",`${p.name} · ${S.job.company}`,`<form class="form" data-form="contact-email" data-id="${p.id}">
+    <label>Email address<input name="email" type="email" maxlength="254" value="${E(p.email)}"></label>
+    <label>Source for the address<input name="email_source" type="url" maxlength="1800" value="${E(p.email_source)}"></label>
+    <p class="hint">A public source can be dated or outdated. Verify the address and current role before sending.</p>
+    <div class="actions"><button class="button primary">Save email</button>${B("Back to job","job-back")}</div></form>`);
 }
 async function openConversation(id, returnJob=null) {
   S.item=await api(`/outreach/${id}`);
@@ -451,13 +461,14 @@ function showConversation() {
       <form class="form" data-form="contact-handoff" data-id="${i.id}">
         ${i.channel==="linkedin"?`<label>LinkedIn profile URL<input name="profile_url" type="url" maxlength="1800" value="${E(i.profile_url)}"></label>`:
         `<label>Recipient email<input name="email" type="email" maxlength="254" value="${E(i.email)}"></label>
-          <span class="hint">Gmail opens with the recipient and subject. Copy your message here and paste it into Gmail before sending.</span>`}
+          <label>Source for the address<input name="email_source" type="url" maxlength="1800" value="${E(i.email_source)}"></label>
+          <span class="hint">A source may be outdated. Verify the address before sending.</span>`}
         <div><button class="button small">Save contact handoff</button></div></form></details>`:""}
     ${i.state==="draft"?`<form class="form" data-form="message" data-id="${i.id}"><label>${i.initial_schedule_id?"Scheduled message":"Editable message"}<textarea id="draft-text" name="text" maxlength="4000" required ${i.initial_schedule_id?"readonly":""}>${E(i.draft)}</textarea></label>
     ${i.initial_schedule_id?`<p class="hint">${i.initial_scheduled_issue||i.gmail_send_pending?"Scheduled request needs review":`Scheduled for ${date(i.initial_scheduled_send_at,true)}`} · To ${E(i.initial_scheduled_recipient)}</p>
       ${i.initial_scheduled_issue?`<p class="evidence">${E(i.initial_scheduled_issue)}</p>`:""}
       ${i.initial_scheduled_auto_days?`<p class="hint">A follow-up is planned ${num(i.initial_scheduled_auto_days)} days after a confirmed send, if there is no reply.</p>`:""}`:""}
-    ${sendRequest?`<p class="hint">From ${E(mail.account)} to ${E(i.email)}<br>Subject: ${E(`Referral request for ${i.job_title}`)}</p>`:""}
+    ${sendRequest?`<p class="hint">From ${E(mail.account)} to ${E(i.email)}<br>Subject: ${E(`Referral request for ${i.job_title}`)}${i.email_source?`<br>${L("Review email source",i.email_source)}`:""}</p>`:""}
     ${sendRequest&&mail.scheduling?`<details class="section"><summary>Optional automatic follow-up</summary>
       <label class="checklabel"><input type="checkbox" id="auto-follow-up"> Schedule this follow-up when I send</label>
       <label>Follow-up message<textarea id="auto-follow-up-text" maxlength="4000">${E(i.follow_up_draft||followUpText(i))}</textarea></label>
@@ -610,7 +621,7 @@ async function act(action,id) {
     next:()=>{S.offset+=30;return refreshJobs();},
     "toggle-hidden":()=>{S.hidden=!S.hidden;S.offset=0;return render();},
     save:()=>jobFlag(id,"save"),apply:()=>jobFlag(id,"apply"),hide:()=>jobFlag(id,"hide"),"job-back":showJob,find:()=>findPeople(id),
-    person:()=>person(id===""?-1:Number(id)),conversation:()=>openConversation(id),
+    person:()=>person(id===""?-1:Number(id)),"contact-email":()=>contactEmail(id),conversation:()=>openConversation(id),
     "job-conversation":()=>openConversation(id,S.job.id),"prior-conversation":()=>openConversation(id,S.returnJob),"verify-job":()=>verifyJob(id),
     "copy-query":()=>copy(S.query),"copy-message":()=>copy($("#draft-text").value),
     "copy-follow-up":()=>copy($("#follow-up-text").value),
@@ -701,6 +712,12 @@ document.addEventListener("submit",event=>{
         }
         const item=await api(`/jobs/${S.job.id}/draft`,"POST",{channel,evidence,contact});
         await openConversation(item.id,S.job.id);await refreshNextActions();notice("Draft ready to review.");
+        break;
+      }
+      case "contact-email": {
+        const jobId=S.job.id;
+        await api(`/contacts/${id}/email`,"PATCH",data);
+        await openJob(jobId);await findPeople(jobId);notice("Contact email saved.");
         break;
       }
       case "message":
