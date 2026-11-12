@@ -303,9 +303,10 @@ class Store:
                          (f"{len(jobs)} published openings", checked_at, checked_at, company_id))
             fresh = 0
             new_scan = baseline_id if company["successful_at"] else None
+            last_completed = conn.execute("SELECT coalesce(max(id),0) FROM scans WHERE scope='full' AND state='completed'").fetchone()[0]
             for job in jobs:
-                _, inserted = self.upsert_job(conn, company_id, job, checked_at, new_scan)
-                fresh += bool(inserted and new_scan and job["score"])
+                _, discovered = self.upsert_job(conn, company_id, job, checked_at, new_scan, last_completed_scan=last_completed)
+                fresh += bool(discovered and new_scan and job["score"])
             # Two successful snapshots must agree before a posting disappears.
             conn.execute("""UPDATE jobs SET misses=misses+1, archived=CASE WHEN misses>=1 THEN 1 ELSE archived END
                             WHERE company_id=? AND manual=0 AND last_seen<>? AND archived=0""",
@@ -313,16 +314,22 @@ class Store:
             conn.execute("UPDATE scans SET checked=checked+1, fresh=fresh+? WHERE id=?", (fresh, scan_id))
 
     @staticmethod
-    def upsert_job(conn, company_id, job, observed, scan_id=None, manual=False):
-        current = conn.execute("""SELECT id, manual FROM jobs WHERE company_id=? AND
+    def upsert_job(conn, company_id, job, observed, scan_id=None, manual=False, last_completed_scan=None):
+        current = conn.execute("""SELECT id, manual, new_scan FROM jobs WHERE company_id=? AND
                                    (external_id=? OR canonical_url=?) ORDER BY external_id=? DESC LIMIT 1""",
                                (company_id, job["external_id"], job["canonical_url"], job["external_id"])).fetchone()
         if current:
+            recovered = False
             if not manual:
+                previous = current["new_scan"]
+                if (scan_id and last_completed_scan is not None and previous
+                        and last_completed_scan < previous < scan_id):
+                    prior = conn.execute("SELECT scope,state FROM scans WHERE id=?", (previous,)).fetchone()
+                    recovered = bool(prior and prior["scope"] == "full" and prior["state"] in {"failed", "interrupted"})
                 updates = ",".join(f"{field}=?" for field in JOB_FIELDS)
-                conn.execute(f"UPDATE jobs SET {updates}, last_seen=?, misses=0, archived=0, manual=0 WHERE id=?",
-                             (*[job[field] for field in JOB_FIELDS], observed, current["id"]))
-            return current["id"], False
+                conn.execute(f"UPDATE jobs SET {updates}, last_seen=?, misses=0, archived=0, manual=0, new_scan=? WHERE id=?",
+                             (*[job[field] for field in JOB_FIELDS], observed, scan_id if recovered else previous, current["id"]))
+            return current["id"], recovered
         fields = ",".join(JOB_FIELDS)
         values = ",".join("?" for _ in JOB_FIELDS)
         result = conn.execute(f"""INSERT INTO jobs(company_id,{fields},first_seen,last_seen,new_scan,manual)

@@ -1138,6 +1138,70 @@ def test_new_jobs_failure_recovery_and_source_coverage(desk, monkeypatch):
     assert result(client.get("/api/jobs"))["items"] == []
 
 
+@pytest.mark.parametrize("state", ["interrupted", "failed"])
+def test_new_job_found_in_incomplete_scan_is_recovered_on_next_full_scan(desk, monkeypatch, state):
+    client, store = desk
+    company = register(client)
+    rows = [sample()]
+    async def fetch(_client, _company, _limit):
+        return rows, None
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    scan(client)
+    incomplete = store.write("INSERT INTO scans(started_at,state,scope,total) VALUES(?,?,?,?)",
+                             (app_module.now(), "running", "full", 1))
+    rows = [sample(), sample("24")]
+    store.finish_source(incomplete, store.one("SELECT * FROM companies WHERE id=?", (company["id"],)), rows, None, incomplete)
+    store.write("UPDATE scans SET state=? WHERE id=?", (state, incomplete))
+    found = store.one("SELECT id,first_seen FROM jobs WHERE external_id='24'")
+    result(client.patch(f"/api/jobs/{found['id']}", json={"saved":True, "applied":True}))
+    assert result(client.get("/api/jobs?latest=true"))["items"] == []
+    recovered = scan(client)
+    latest = result(client.get("/api/jobs?latest=true"))["items"]
+    assert recovered["fresh"] == 1 and len(latest) == 1
+    assert latest[0]["id"] == found["id"] and latest[0]["first_seen"] == found["first_seen"]
+    assert latest[0]["saved"] and latest[0]["applied_at"] and latest[0]["new_scan"] == recovered["id"]
+    assert len(result(client.get("/api/jobs"))["items"]) == 2
+    assert scan(client)["fresh"] == 0
+    assert result(client.get("/api/jobs?latest=true"))["items"] == []
+
+
+def test_old_interrupted_discoveries_are_not_relabeled_after_a_completed_scan(desk, monkeypatch):
+    client, store = desk
+    company = register(client)
+    rows, failure = [sample()], None
+    async def fetch(_client, _company, _limit):
+        return rows, failure
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    scan(client)
+    incomplete = store.write("INSERT INTO scans(started_at,state,scope,total) VALUES(?,?,?,?)",
+                             (app_module.now(), "running", "full", 1))
+    rows = [sample(), sample("24")]
+    store.finish_source(incomplete, store.one("SELECT * FROM companies WHERE id=?", (company["id"],)), rows, None, incomplete)
+    store.write("UPDATE scans SET state='interrupted' WHERE id=?", (incomplete,))
+    failure = "HTTP 503"
+    assert scan(client)["failed"] == 1
+    failure = None
+    assert scan(client)["fresh"] == 0
+    assert len(result(client.get("/api/jobs"))["items"]) == 2
+    assert result(client.get("/api/jobs?latest=true"))["items"] == []
+
+
+def test_interrupted_first_company_baseline_does_not_mark_existing_jobs_new(desk, monkeypatch):
+    client, store = desk
+    company = register(client)
+    incomplete = store.write("INSERT INTO scans(started_at,state,scope,total) VALUES(?,?,?,?)",
+                             (app_module.now(), "running", "full", 1))
+    rows = [sample()]
+    store.finish_source(incomplete, store.one("SELECT * FROM companies WHERE id=?", (company["id"],)), rows, None, incomplete)
+    store.write("UPDATE scans SET state='interrupted' WHERE id=?", (incomplete,))
+    async def fetch(_client, _company, _limit):
+        return rows, None
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    assert scan(client)["fresh"] == 0
+    assert len(result(client.get("/api/jobs"))["items"]) == 1
+    assert result(client.get("/api/jobs?latest=true"))["items"] == []
+
+
 def test_retry_checks_only_failed_feeds_and_keeps_full_baseline(desk, monkeypatch):
     client, _ = desk
     register(client)
