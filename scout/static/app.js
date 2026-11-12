@@ -36,11 +36,12 @@ function notice(text,error=false) {
 function scanStatus() {
   const {scan,stats}=S.info, running=scan?.state==="running", button=$("#scan-button");
   const retry=scan?.scope==="retry";
+  const pending=scan?.scope==="pending";
   const checked=`${num(scan?.checked)} ${scan?.checked===1?"feed":"feeds"}`;
   button.disabled=running;
-  button.innerHTML=running?`<span aria-hidden='true'>↻</span> ${retry?"Retrying feeds…":"Scanning…"}`:"<span aria-hidden='true'>↻</span> Find latest jobs";
-  $("#scan-progress").textContent=running ? `${num(scan.checked+scan.failed+scan.unsupported)} of ${num(scan.total)} ${retry?"failed feeds retried":"sources accounted for"}`
-    : scan?.state==="completed" ? `${retry?"Last retry":"Last scan"} ${date(scan.finished_at,true)} · ${checked} ${retry?"recovered":"checked"} · ${scan.failed} failed${scan.fresh ? ` · ${num(scan.fresh)} new matches` : ""}`
+  button.innerHTML=running?`<span aria-hidden='true'>↻</span> ${retry?"Retrying feeds…":pending?"Checking new feeds…":"Scanning…"}`:"<span aria-hidden='true'>↻</span> Find latest jobs";
+  $("#scan-progress").textContent=running ? `${num(scan.checked+scan.failed+scan.unsupported)} of ${num(scan.total)} ${retry?"failed feeds retried":pending?"new feeds checked":"sources accounted for"}`
+    : scan?.state==="completed" ? `${retry?"Last retry":pending?"New feed check":"Last scan"} ${date(scan.finished_at,true)} · ${checked} ${retry?"recovered":"checked"} · ${scan.failed} failed${scan.fresh ? ` · ${num(scan.fresh)} new matches` : ""}`
     : scan ? scan.note||"Previous scan interrupted." : `${num(stats.configured)} feeds ready · no scan yet`;
   $("#nav-due").hidden=!stats.due;
   $("#nav-due").textContent=stats.due;
@@ -57,7 +58,7 @@ function pollScan() {
       } else {
         await render();
         const finished=S.info.scan;
-        notice(finished.state!=="completed"?"The scan stopped early.":finished.scope==="retry"?"Failed-feed retry complete.":"Scan complete. Your shortlist is ready.",finished.state!=="completed");
+        notice(finished.state!=="completed"?"The scan stopped early.":finished.scope==="retry"?"Failed-feed retry complete.":finished.scope==="pending"?"New feed check complete.":"Scan complete. Your shortlist is ready.",finished.state!=="completed");
       }
     } catch(error) {notice(error.message,true);}
     pollScan();
@@ -68,7 +69,7 @@ async function startScan(scope="full") {
     S.latest=false;
     if ($("#latest")) $("#latest").checked=false;
   }
-  S.info.scan=await api(scope==="retry"?"/scans/retry-failed":"/scans","POST");
+  S.info.scan=await api(scope==="retry"?"/scans/retry-failed":scope==="pending"?"/scans/pending":"/scans","POST");
   if ($("#coverage-panel")) $("#coverage-panel").innerHTML=coverage();
   if(S.page!=="jobs") location.hash="jobs";
   scanStatus(); pollScan();
@@ -82,7 +83,7 @@ function coverage() {
     <div>Checked in full scan <strong>${full?num(full.checked):"—"}</strong></div>
     <div>Feeds currently failing <strong>${num(stats.failed_feeds)}</strong></div>
     <div>Manual sources in full scan <strong>${full?num(full.unsupported):"—"}</strong></div>
-    </div>${stats.failed_feeds&&scan?.state!=="running"?`<div class="actions">${B("Retry failed feeds","retry-feeds","","small")}</div>`:""}
+    </div>${scan?.state!=="running"&&(stats.failed_feeds||stats.pending_feeds)?`<div class="actions">${stats.pending_feeds?B(`Check ${num(stats.pending_feeds)} new feeds`,"pending-feeds","","small"):""}${stats.failed_feeds?B("Retry failed feeds","retry-feeds","","small"):""}</div>`:""}
     <a href="#watchlist">View employer watchlist →</a>`;
 }
 function jobRow(job) {
@@ -549,7 +550,7 @@ async function copy(text) {
 async function act(action,id) {
   if(action.startsWith("event-")) return eventAction(id,action.slice(6));
   const handlers={
-    close:()=>modal.close(), command:commands, import:jobImport, scan:startScan, "retry-feeds":()=>startScan("retry"), company:()=>employer(Number(id)), job:()=>openJob(id),
+    close:()=>modal.close(), command:commands, import:jobImport, scan:startScan, "retry-feeds":()=>startScan("retry"), "pending-feeds":()=>startScan("pending"), company:()=>employer(Number(id)), job:()=>openJob(id),
     prev:()=>{S.offset=Math.max(0,S.offset-30);return refreshJobs();},
     next:()=>{S.offset+=30;return refreshJobs();},
     "toggle-hidden":()=>{S.hidden=!S.hidden;S.offset=0;return render();},

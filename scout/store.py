@@ -204,6 +204,14 @@ class Store:
                          for row in csv.DictReader(handle) if row["name"] in WORKDAY_SOURCES),
                     )
                 conn.execute("INSERT INTO settings VALUES('sources_workday_1','1')")
+            if seed and not conn.execute("SELECT 1 FROM settings WHERE key='sources_workday_2'").fetchone():
+                with DATA.open(encoding="utf-8-sig", newline="") as handle:
+                    conn.executemany(
+                        "UPDATE companies SET provider=?,board=?,status='pending',note='' WHERE name=? AND url=? AND provider='' AND board=''",
+                        ((row["provider"], row["board"], row["name"], row["url"])
+                         for row in csv.DictReader(handle) if row["name"] in {"CrowdStrike", "Mastercard"}),
+                    )
+                conn.execute("INSERT INTO settings VALUES('sources_workday_2','1')")
 
     def one(self, sql, params=()):
         with self.connect() as conn:
@@ -235,6 +243,7 @@ class Store:
             (SELECT COUNT(*) FROM companies) AS companies,
             (SELECT COUNT(*) FROM companies WHERE enabled AND provider<>'') AS configured,
             (SELECT COUNT(*) FROM companies WHERE enabled AND provider<>'' AND status='failed') AS failed_feeds,
+            (SELECT COUNT(*) FROM companies WHERE enabled AND provider<>'' AND status='pending') AS pending_feeds,
             (SELECT COUNT(*) FROM jobs j JOIN companies c ON c.id=j.company_id
               WHERE j.archived=0 AND j.hidden=0 AND j.score>0 AND (c.enabled=1 OR j.manual=1)) AS matches,
             (SELECT COUNT(*) FROM jobs WHERE saved=1 OR applied_at IS NOT NULL) AS saved,

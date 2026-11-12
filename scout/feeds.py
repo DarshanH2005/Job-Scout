@@ -460,6 +460,25 @@ async def fetch_board(client, company, limit):
             jobs = [job for row in rows if (job := normalize(provider, row))]
             if rows and not jobs and not (provider == "ashby" and all(row.get("isListed") is False for row in rows)):
                 raise ValueError("The feed contained no readable postings.")
+            if provider == "smartrecruiters":
+                candidates = [i for i, job in enumerate(jobs) if job["score"] > 0
+                              and job["region"] in {"india", "india_remote"}]
+                candidates.sort(key=lambda i: -jobs[i]["score"])
+                detail_limit = asyncio.Semaphore(2)
+
+                async def enrich_smart(index):
+                    async with detail_limit:
+                        try:
+                            original = jobs[index]
+                            description, workplace = await smartrecruiters_detail(client, company["board"], original["external_id"])
+                            if not workplace and original["evidence"] == f'{original["location"]} · Remote':
+                                workplace = "Remote"
+                            jobs[index] = build_job(original["external_id"], original["title"], original["department"],
+                                                    original["location"], workplace, description, original["url"],
+                                                    original["posted_at"], original["apply_url"])
+                        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+                            pass  # Preserve the summary when an individual detail is unavailable.
+                await asyncio.gather(*(enrich_smart(i) for i in candidates[:20]))
             return jobs, None
         except httpx.HTTPStatusError as exc:
             return [], f"Employer feed returned HTTP {exc.response.status_code}."
@@ -506,6 +525,27 @@ async def workday_detail(client, board, external_id):
     location = ", ".join(dict.fromkeys(locations))
     workplace = "Remote" if str(info.get("remoteType", "")).casefold() == "remote" else ""
     return description, location, workplace
+
+
+async def smartrecruiters_detail(client, board, external_id):
+    url = PROVIDERS["smartrecruiters"].format(board=quote(board, safe="")) + "/" + quote(external_id, safe="")
+    detail = await fetch_json(client, url)
+    if (str(detail["id"]) != external_id or detail.get("active") is False
+            or detail["company"]["identifier"].casefold() != board.casefold()):
+        raise ValueError("The employer posting did not match.")
+    sections = detail["jobAd"]["sections"]
+    parts = []
+    for key in ("companyDescription", "jobDescription", "qualifications", "additionalInformation"):
+        section = sections.get(key) or {}
+        title, text = clean(section.get("title")), clean(section.get("text"))
+        if text:
+            parts.append("\n".join(filter(None, (title, text))))
+    description = "\n".join(parts)[:30000]
+    if not description:
+        raise ValueError("The employer posting contained no description.")
+    location = detail.get("location") or {}
+    workplace = "Hybrid" if location.get("hybrid") else "Remote" if location.get("remote") else ""
+    return description, workplace
 
 
 async def workday_postings(client, base):

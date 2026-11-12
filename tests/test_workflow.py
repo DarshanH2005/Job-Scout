@@ -765,6 +765,27 @@ def test_retry_checks_only_failed_feeds_and_keeps_full_baseline(desk, monkeypatc
     assert all(row["new_scan"] == full["id"] for row in recent)
 
 
+def test_check_new_feeds_preserves_full_scan_and_first_scan_baseline(desk, monkeypatch):
+    client, _ = desk
+    register(client)
+    calls = []
+    async def fetch(_client, company, _limit):
+        calls.append(company["board"])
+        return [sample(company["board"])], None
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    full = scan(client)
+    assert client.post("/api/scans/pending").status_code == 409
+    register(client, name="New Company", board="new")
+    assert result(client.get("/api/state"))["stats"]["pending_feeds"] == 1
+    calls.clear()
+    pending = scan(client, "/api/scans/pending")
+    assert calls == ["new"] and pending["scope"] == "pending" and pending["fresh"] == 0
+    state = result(client.get("/api/state"))
+    assert state["full_scan"]["id"] == full["id"] and state["stats"]["pending_feeds"] == 0
+    assert {j["company"] for j in result(client.get("/api/jobs"))["items"]} == {"Sample Company", "New Company"}
+    assert result(client.get("/api/jobs?latest=true"))["items"] == []
+
+
 def test_newly_discovered_jobs_rank_ahead_within_location_group(desk, monkeypatch):
     client, _ = desk
     register(client)
@@ -973,6 +994,41 @@ def test_smartrecruiters_rejects_incomplete_snapshot():
     assert not jobs and error
 
 
+@pytest.mark.parametrize(("case", "expected_score"), [("required", 0), ("preferred", 55), ("wrong_employer", 55), ("unavailable", 55)])
+def test_smartrecruiters_scan_checks_india_requirements(case, expected_score):
+    def respond(request):
+        if request.url.path.endswith("/postings"):
+            return httpx.Response(200, json={"content":[{"id":"123", "name":"Software Engineer",
+                "company":{"identifier":"Sample"}, "location":{"fullLocation":"Hyderabad, India"}}], "totalFound":1})
+        if case == "unavailable":
+            return httpx.Response(404)
+        title = "Preferred qualifications" if case == "preferred" else "Minimum requirements"
+        return httpx.Response(200, json={"id":"123", "company":{"identifier":"Other" if case == "wrong_employer" else "Sample"},
+            "jobAd":{"sections":{"qualifications":{"title":title, "text":"<p>4+ years of professional software development experience.</p>"}}}})
+    async def read():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await fetch_board(client, {"provider":"smartrecruiters", "board":"Sample"}, asyncio.Semaphore(1))
+    jobs, error = asyncio.run(read())
+    assert error is None and len(jobs) == 1 and jobs[0]["score"] == expected_score
+    assert bool(jobs[0]["description"]) == (case in {"required", "preferred"})
+
+
+def test_smartrecruiters_india_detail_requests_are_bounded():
+    rows = [{"id":str(i), "name":"Software Engineer", "company":{"identifier":"Sample"},
+             "location":{"fullLocation":"India"}} for i in range(22)]
+    calls = []
+    def respond(request):
+        if request.url.path.endswith("/postings"):
+            return httpx.Response(200, json={"content":rows, "totalFound":len(rows)})
+        calls.append(request.url.path)
+        return httpx.Response(404)
+    async def read():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await fetch_board(client, {"provider":"smartrecruiters", "board":"Sample"}, asyncio.Semaphore(1))
+    jobs, error = asyncio.run(read())
+    assert error is None and len(jobs) == 22 and len(calls) == 20
+
+
 @pytest.mark.parametrize("case", ["complete", "zero_total", "capped", "missing", "shifting", "duplicate", "unsafe_path", "first_changed"])
 def test_workday_requires_complete_stable_snapshot(case):
     import json
@@ -1132,6 +1188,20 @@ def test_workday_source_migration_preserves_customized_company(tmp_path):
     assert store.one("SELECT provider,board FROM companies WHERE name='Adobe'") == {
         "provider":"workday", "board":"adobe.wd5.external_experienced"}
     assert store.one("SELECT provider,url FROM companies WHERE name='Intel'") == {
+        "provider":"", "url":"https://custom.example/jobs"}
+
+
+def test_new_workday_sources_preserve_customized_watchlist(tmp_path):
+    store = Store(tmp_path / "migration.sqlite3")
+    store.initialize(seed=True)
+    assert store.one("SELECT count(*) AS count FROM companies WHERE provider<>''")["count"] == 170
+    store.write("UPDATE companies SET provider='',board='',status='unsupported',enabled=0 WHERE name='CrowdStrike'")
+    store.write("UPDATE companies SET provider='',board='',url='https://custom.example/jobs' WHERE name='Mastercard'")
+    store.write("DELETE FROM settings WHERE key='sources_workday_2'")
+    store.initialize(seed=True)
+    assert store.one("SELECT provider,board,enabled FROM companies WHERE name='CrowdStrike'") == {
+        "provider":"workday", "board":"crowdstrike.wd5.crowdstrikecareers", "enabled":0}
+    assert store.one("SELECT provider,url FROM companies WHERE name='Mastercard'") == {
         "provider":"", "url":"https://custom.example/jobs"}
 
 

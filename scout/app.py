@@ -21,7 +21,7 @@ from pydantic import AwareDatetime, BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import credentials
-from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, graduation_warning, public_url, work_authorization_evidence, workday_base, workday_detail, workday_path
+from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, graduation_warning, public_url, smartrecruiters_detail, work_authorization_evidence, workday_base, workday_detail, workday_path
 from .gmail import Gmail, REVIEWABLE_ISSUES, headers, incoming_reply, parse_reviewed_ids, reviewable_message_ids, thread_review_snapshot
 from .research import ResearchCache, find_people, rewrite
 from .store import OUTREACH_SELECT, Store, now
@@ -168,18 +168,22 @@ class Scanner:
 
     def start(self, scope="full"):
         if self.running:
-            if scope == "retry":
+            if scope in {"retry", "pending"}:
                 fail("A scan is already running.", 409)
             return self.store.one("SELECT * FROM scans ORDER BY id DESC LIMIT 1")
         query = "SELECT * FROM companies WHERE enabled=1"
         if scope == "retry":
             query += " AND status='failed' AND provider<>''"
+        elif scope == "pending":
+            query += " AND status='pending' AND provider<>''"
         companies = self.store.all(query + " ORDER BY id")
         if scope == "retry" and not companies:
             fail("There are no failed feeds to retry.", 409)
+        if scope == "pending" and not companies:
+            fail("There are no new feeds waiting to be checked.", 409)
         scan_id = self.store.write("INSERT INTO scans(started_at,state,scope,total) VALUES(?,?,?,?)",
                                    (now(), "running", scope, len(companies)))
-        full = self.store.last_full_scan() if scope == "retry" else None
+        full = self.store.last_full_scan() if scope != "full" else None
         baseline_id = scan_id if scope == "full" else full and full["id"]
         self.task = asyncio.create_task(self.run(scan_id, companies, baseline_id))
         return self.store.one("SELECT * FROM scans WHERE id=?", (scan_id,))
@@ -343,6 +347,10 @@ def create_app(db_path=None, seed=True):
     async def retry_failed():
         return scanner.start("retry")
 
+    @app.post("/api/scans/pending", status_code=202)
+    async def scan_pending():
+        return scanner.start("pending")
+
     @app.get("/api/companies")
     async def companies():
         return store.all("SELECT * FROM companies ORDER BY name COLLATE NOCASE")
@@ -421,24 +429,8 @@ def create_app(db_path=None, seed=True):
                 if item["provider"] == "workday":
                     description, detail_location, workplace = await workday_detail(client, company["board"], item["external_id"])
                 else:
-                    url = PROVIDERS["smartrecruiters"].format(board=quote(company["board"], safe=""))
-                    url += "/" + quote(item["external_id"], safe="")
-                    detail = await fetch_json(client, url)
-            if item["provider"] == "smartrecruiters":
-                detail_location = item["location"]
-                if (str(detail["id"]) != item["external_id"] or detail.get("active") is False
-                        or detail["company"]["identifier"].casefold() != company["board"].casefold()):
-                    raise ValueError("The employer posting did not match.")
-                sections = detail["jobAd"]["sections"]
-                parts = []
-                for key in ("companyDescription", "jobDescription", "qualifications", "additionalInformation"):
-                    section = sections.get(key) or {}
-                    title, text = clean(section.get("title")), clean(section.get("text"))
-                    if text:
-                        parts.append("\n".join(filter(None, (title, text))))
-                description = "\n".join(parts)[:30000]
-                location = detail.get("location") or {}
-                workplace = "Hybrid" if location.get("hybrid") else "Remote" if location.get("remote") else ""
+                    description, workplace = await smartrecruiters_detail(client, company["board"], item["external_id"])
+                    detail_location = item["location"]
             if not description:
                 raise ValueError("The employer posting contained no description.")
             item["description"] = description
