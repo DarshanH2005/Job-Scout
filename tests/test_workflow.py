@@ -2647,6 +2647,54 @@ def test_a_transient_feed_failure_keeps_the_last_success_time(desk, monkeypatch)
     assert after["successful_at"] == first
 
 
+def test_evaluate_measures_precision_and_flags_problem_rows(tmp_path, capsys):
+    import csv as csv_module
+    import json
+    from scout import evaluate
+    sheet = tmp_path / "pilot-shortlist.csv"
+    labelled = [
+        (1, "shortlist", 90, ""), (2, "shortlist", 90, ""), (3, "shortlist", 90, ""),
+        (4, "reject:level", 90, "3+ years"), (5, "reject:level", 90, "3+ years"),
+        (6, "reject:level", 55, "5 years"), (7, "reject:level", 55, "2+ years"),
+        (8, "reject:level", 55, "2+ years"), (9, "reject:role", 55, "wrong stack"),
+        (10, "unclear:eligibility", 55, ""),
+        (11, "reject:other", 55, ""), (12, "reject:other", 55, ""),
+        (13, "maybe", 55, ""), (14, "", 55, ""),
+    ]
+    with sheet.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv_module.DictWriter(handle, fieldnames=["review_priority", "decision", "reject_reason", "score", "title", "company"])
+        writer.writeheader()
+        for priority, decision, score, reason in labelled:
+            writer.writerow({"review_priority": priority, "decision": decision, "reject_reason": reason,
+                             "score": score, "title": f"Role {priority}", "company": "Acme"})
+    _, rows = evaluate.load([tmp_path])
+    report = evaluate.summarise(rows)
+    assert report["rows"] == 14 and report["labelled"] == 12 and report["unlabelled"] == 2
+    assert report["precision_at_top"] == 0.3 and report["hard_exclusions_in_top"] == 5
+    assert report["by_bucket"]["90"] == {"labelled": 5, "shortlist": 3, "rate": 0.6}
+    assert report["by_bucket"]["55"] == {"labelled": 7, "shortlist": 0, "rate": 0.0}
+    assert report["unknown_decisions"] == ["maybe"]
+    assert report["rejections_missing_reason"] == 2
+    text = evaluate.render(report)
+    assert "below" in text and "hard exclusions" in text and "data quality" in text
+    assert evaluate.main(["--labels", str(sheet), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["labelled"] == 12
+
+
+def test_evaluate_asks_for_labels_before_measuring(tmp_path):
+    import csv as csv_module
+    from scout import evaluate
+    sheet = tmp_path / "pilot-shortlist.csv"
+    with sheet.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv_module.DictWriter(handle, fieldnames=["review_priority", "decision", "score"])
+        writer.writeheader()
+        writer.writerows([{"review_priority": 1, "decision": "", "score": 90}])
+    _, rows = evaluate.load([tmp_path])
+    report = evaluate.summarise(rows)
+    assert report["labelled"] == 0 and report["precision_at_top"] is None
+    assert "No decisions recorded yet" in evaluate.render(report)
+
+
 def test_pilot_sheet_ranks_india_roles_and_never_writes(tmp_path):
     from pathlib import Path
     from scout import pilot
