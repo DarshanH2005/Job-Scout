@@ -2647,6 +2647,68 @@ def test_a_transient_feed_failure_keeps_the_last_success_time(desk, monkeypatch)
     assert after["successful_at"] == first
 
 
+def test_storage_report_counts_retention_candidates_and_never_writes(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from scout import storage
+    from scout.feeds import build_job
+    db = tmp_path / "storage.sqlite3"
+    store = Store(db)
+    store.initialize(seed=False)
+    old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(timespec="microseconds")
+    with store.connect() as conn:
+        company = conn.execute(
+            "INSERT INTO companies(name,url,provider,board,status) VALUES('Acme','https://x','ashby','acme','checked')"
+        ).lastrowid
+
+        def add(external_id, title, score):
+            job = build_job(external_id, title, "Engineering", "Bengaluru, India", "",
+                            "job text " * 60, f"https://example.test/{external_id}")
+            job_id, _ = store.upsert_job(conn, company, job, old)
+            conn.execute("UPDATE jobs SET score=?, last_seen=? WHERE id=?", (score, old, job_id))
+            return job_id
+
+        prunable = add("1", "Junior Software Engineer", 0)
+        add("2", "Junior Data Engineer", 90)
+        saved = add("3", "Junior ML Engineer", 0)
+        conn.execute("UPDATE jobs SET saved=1 WHERE id=?", (saved,))
+        contacted = add("4", "Junior Platform Engineer", 0)
+        contact = conn.execute("INSERT INTO contacts(company_id,name) VALUES(?, 'Jane')", (company,)).lastrowid
+        conn.execute("""INSERT INTO outreach(job_id,contact_id,channel,draft,state,created_at)
+                        VALUES(?,?,'linkedin','hi','draft',?)""", (contacted, contact, old))
+    description_bytes = store.one("SELECT LENGTH(description) AS size FROM jobs WHERE id=?", (prunable,))["size"]
+    before = (db.stat().st_size, store.one("SELECT count(*) AS count FROM settings")["count"])
+
+    report = storage.analyze(db, days=30, delete_days=30)
+
+    assert report["jobs"]["total"] == 4 and report["jobs"]["matching"] == 1
+    assert report["jobs"]["saved_or_applied"] == 1
+    assert report["retention"]["clear_description"] == {"rows": 1, "description_bytes": description_bytes}
+    assert report["retention"]["delete_rows"]["rows"] == 1
+    assert report["growth"]["recent_rows_per_day"] == 0
+    after = (db.stat().st_size, store.one("SELECT count(*) AS count FROM settings")["count"])
+    assert after == before
+
+
+def test_storage_report_handles_an_older_database_without_posting_checks(tmp_path):
+    from scout import storage
+    store = Store(tmp_path / "older.sqlite3")
+    store.initialize(seed=False)
+    store.write("DROP TABLE posting_checks")
+    report = storage.analyze(tmp_path / "older.sqlite3")
+    assert report["jobs"]["total"] == 0
+    assert "posting_checks" not in report["tables"]
+
+
+def test_storage_cli_prints_json(tmp_path, capsys):
+    import json
+    from scout import storage
+    db = tmp_path / "cli.sqlite3"
+    Store(db).initialize(seed=False)
+    assert storage.main(["--database", str(db), "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["jobs"]["total"] == 0 and report["growth"]["megabytes_per_day"] == 0
+
+
 def test_progress_reports_the_job_search_funnel(desk):
     from datetime import datetime, timedelta, timezone
     client, store = desk
