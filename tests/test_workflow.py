@@ -2852,6 +2852,40 @@ def test_progress_reports_the_job_search_funnel(desk):
     assert (progress["requests_sent"], progress["applied"]) == (1, 1)
 
 
+def test_backup_create_leaves_one_portable_file(tmp_path):
+    from scout import backup
+    db = tmp_path / "scout.sqlite3"
+    store = Store(db)
+    store.initialize(seed=False)
+    store.write("""INSERT INTO companies(name,url,provider,board,status)
+                   VALUES('Acme','https://example.test','ashby','acme','checked')""")
+    info = backup.create(db, tmp_path / "backups", keep=1)
+    assert sorted(path.name for path in (tmp_path / "backups").iterdir()) == [info["name"]]
+    assert backup.verify(info["path"])["counts"]["companies"] == 1
+
+
+def test_backup_verify_rejects_an_empty_file(tmp_path):
+    from scout import backup
+    empty = tmp_path / "scout-backup-20260101-000000-000000.sqlite3"
+    empty.write_bytes(b"")
+    with pytest.raises(ValueError, match="empty"):
+        backup.verify(empty)
+
+
+def test_backup_prune_removes_sidecars_of_rotated_snapshots(tmp_path):
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from scout import backup
+    db = tmp_path / "scout.sqlite3"
+    Store(db).initialize(seed=False)
+    first = backup.create(db, tmp_path / "backups", keep=2, now=datetime(2026, 11, 14, 9, tzinfo=timezone.utc))
+    stale_wal = Path(first["path"] + "-wal")
+    stale_wal.write_bytes(b"left over by SQLite")
+    backup.create(db, tmp_path / "backups", keep=2, now=datetime(2026, 11, 14, 10, tzinfo=timezone.utc))
+    backup.create(db, tmp_path / "backups", keep=1, now=datetime(2026, 11, 14, 11, tzinfo=timezone.utc))
+    assert not stale_wal.exists() and not Path(first["path"]).exists()
+
+
 def test_backup_snapshot_is_compressed_verified_and_pruned(tmp_path):
     from datetime import datetime, timezone
     from scout import backup

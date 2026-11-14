@@ -18,7 +18,7 @@ import sqlite3
 import sys
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PREFIX = "scout-backup-"
@@ -63,6 +63,12 @@ def _snapshots(directory):
                   key=lambda item: item.name, reverse=True)
 
 
+def _remove(path):
+    """Remove a database file together with any WAL sidecars SQLite left beside it."""
+    for suffix in ("", "-wal", "-shm"):
+        Path(str(path) + suffix).unlink(missing_ok=True)
+
+
 @contextmanager
 def _readable(path):
     """Yield a path to an uncompressed SQLite file, expanding a .gz snapshot if needed."""
@@ -82,7 +88,7 @@ def _readable(path):
     try:
         yield expanded
     finally:
-        expanded.unlink(missing_ok=True)
+        _remove(expanded)
 
 
 def verify(path, thorough=False):
@@ -91,6 +97,8 @@ def verify(path, thorough=False):
     if not path.is_file():
         raise ValueError(f"Backup file not found: {path}")
     with _readable(path) as readable:
+        if Path(readable).stat().st_size == 0:
+            raise ValueError("Backup file is empty; the snapshot is incomplete.")
         try:
             connection = _readonly(readable)
         except sqlite3.Error as exc:
@@ -119,13 +127,30 @@ def recent(directory, limit=5):
             for item in _snapshots(directory)[:limit]]
 
 
+def _sweep(directory):
+    """Delete sidecars and stale partial files left by an interrupted or older run."""
+    directory = Path(directory)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+    for item in directory.glob(f"{PREFIX}*"):
+        if not item.is_file():
+            continue
+        if item.name.endswith(("-wal", "-shm")):
+            base = item.with_name(item.name.rsplit("-", 1)[0])
+            if not base.exists():
+                item.unlink(missing_ok=True)
+        elif item.name.endswith(".partial"):
+            if datetime.fromtimestamp(item.stat().st_mtime, timezone.utc) < cutoff:
+                item.unlink(missing_ok=True)
+
+
 def prune(directory, keep=DEFAULT_KEEP):
     """Remove older snapshots, always leaving at least the newest one."""
     keep = max(1, int(keep))
     removed = []
     for item in _snapshots(directory)[keep:]:
-        item.unlink(missing_ok=True)
+        _remove(item)
         removed.append(item.name)
+    _sweep(directory)
     return removed
 
 
@@ -145,6 +170,8 @@ def create(database, directory=None, keep=DEFAULT_KEEP, now=None):
         destination = sqlite3.connect(partial)
         try:
             source.backup(destination)
+            # A snapshot must be one portable file, not a database plus WAL sidecars.
+            destination.execute("PRAGMA journal_mode=DELETE")
         finally:
             destination.close()
     finally:
@@ -155,10 +182,11 @@ def create(database, directory=None, keep=DEFAULT_KEEP, now=None):
             shutil.copyfileobj(raw, packed)
         os.replace(compressed_partial, target)
     except Exception:
-        for leftover in (partial, compressed_partial):
-            leftover.unlink(missing_ok=True)
+        _remove(partial)
+        compressed_partial.unlink(missing_ok=True)
         raise
-    partial.unlink(missing_ok=True)
+    _remove(partial)
+    _sweep(directory)
     return {**details, "path": str(target), "name": target.name, "size": target.stat().st_size,
             "compressed": True, "created_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
             "pruned": prune(directory, keep)}
