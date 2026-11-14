@@ -443,6 +443,12 @@ def feed_failure(exc):
     status = exc.response.status_code
     if status == 429 or status >= 500:
         return f"Employer feed temporarily unavailable (HTTP {status})."
+    if 300 <= status < 400:
+        target = (exc.response.headers.get("location") or "").casefold()
+        if "maintenance" in target or "outage" in target:
+            return f"The employer site is showing a maintenance or outage page (HTTP {status}). Retry later."
+        return (f"The employer feed redirected this request (HTTP {status}); "
+                "the site may be down or blocking automated access.")
     return f"Employer feed returned HTTP {status}."
 
 

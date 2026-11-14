@@ -2599,12 +2599,21 @@ def test_temporary_feed_errors_are_reported_as_temporary():
     from scout.feeds import feed_failure
     request = httpx.Request("GET", "https://example.test/feed")
 
-    def message(status):
-        return feed_failure(httpx.HTTPStatusError("failed", request=request, response=httpx.Response(status, request=request)))
+    def message(status, location=None):
+        headers = {"location": location} if location else {}
+        return feed_failure(httpx.HTTPStatusError("failed", request=request,
+                                                  response=httpx.Response(status, headers=headers, request=request)))
 
     assert message(521) == "Employer feed temporarily unavailable (HTTP 521)."
     assert message(503) == "Employer feed temporarily unavailable (HTTP 503)."
+    assert message(403) == "Employer feed returned HTTP 403."
     assert message(404) == "Employer feed returned HTTP 404."
+    assert message(303, "https://community.workday.com/maintenance-page").startswith(
+        "The employer site is showing a maintenance or outage page (HTTP 303).")
+    assert message(302, "https://example.test/outage").startswith(
+        "The employer site is showing a maintenance or outage page (HTTP 302).")
+    assert message(307, "https://example.test/login").startswith(
+        "The employer feed redirected this request (HTTP 307)")
 
 
 def test_registry_fix_repoints_tavily_and_marks_a16z_manual(tmp_path):
