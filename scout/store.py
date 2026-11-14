@@ -12,6 +12,13 @@ from .feeds import EARLY_SCORE, SENIOR, SENIOR_DESCRIPTION, assess, eligibility_
 DATA = Path(__file__).with_name("companies.csv")
 EXPANDED_SOURCES = ("Databricks", "HP", "ServiceNow", "Snowflake", "Zscaler")
 WORKDAY_SOURCES = ("Adobe", "Intel", "Salesforce", "Workday")
+POSTING_CHECK_STATUSES = ("listed", "not_listed", "unavailable")
+POSTING_CHECK_HISTORY = 20
+
+
+def posting_source(provider, external_id):
+    """The employer source a check was made against, so a board change invalidates it."""
+    return f"{provider}:{external_id}" if provider else ""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS companies (
@@ -40,6 +47,12 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS jobs_by_url ON jobs(company_id, canonical_url);
 CREATE INDEX IF NOT EXISTS jobs_shortlist ON jobs(archived, region, score);
+CREATE TABLE IF NOT EXISTS posting_checks (
+    id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id),
+    status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS posting_checks_latest ON posting_checks(job_id, id);
 CREATE TABLE IF NOT EXISTS contacts (
     id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id),
     name TEXT NOT NULL COLLATE NOCASE, title TEXT NOT NULL DEFAULT '',
@@ -247,6 +260,16 @@ class Store:
                          for row in csv.DictReader(handle) if row["name"] in {"CrowdStrike", "Mastercard"}),
                     )
                 conn.execute("INSERT INTO settings VALUES('sources_workday_2','1')")
+            if not conn.execute("SELECT 1 FROM settings WHERE key='sources_fix_1'").fetchone():
+                # a16z retired its Ashby board; jobs.a16z.com mixes portfolio companies, so it is manual only.
+                conn.execute("""UPDATE companies SET provider='', board='', status='unsupported', note='',
+                                checked_at=NULL, successful_at=NULL, url='https://jobs.a16z.com'
+                                WHERE name='a16z' AND provider='ashby' AND board='a16z'""")
+                # Tavily moved from a retired Ashby board to a Greenhouse board with the same identifier.
+                conn.execute("""UPDATE companies SET provider='greenhouse', board='tavily', status='pending', note='',
+                                checked_at=NULL, successful_at=NULL, url='https://job-boards.eu.greenhouse.io/tavily'
+                                WHERE name='Tavily' AND provider='ashby' AND board='tavily'""")
+                conn.execute("INSERT INTO settings VALUES('sources_fix_1','1')")
 
     def one(self, sql, params=()):
         with self.connect() as conn:
@@ -286,6 +309,28 @@ class Store:
         """)
         stats["due"] = self.one(f"SELECT count(*) AS count FROM ({OUTREACH_SELECT}) WHERE inbox_category IN ('delivery','schedule_issue','due')")["count"]
         return stats
+
+    def progress(self):
+        """Funnel counts from records the user actually made; nothing is inferred from page views."""
+        jobs = self.one("""
+            SELECT COALESCE(SUM(CASE WHEN saved=1 OR applied_at IS NOT NULL THEN 1 ELSE 0 END),0) AS shortlisted,
+                   COALESCE(SUM(CASE WHEN hidden=1 AND saved=0 AND applied_at IS NULL THEN 1 ELSE 0 END),0) AS dismissed,
+                   COALESCE(SUM(CASE WHEN applied_at IS NOT NULL THEN 1 ELSE 0 END),0) AS applied,
+                   COALESCE(SUM(CASE WHEN applied_at IS NOT NULL AND julianday(applied_at)>=julianday('now','-7 days') THEN 1 ELSE 0 END),0) AS applied_week
+            FROM jobs""")
+        outreach = self.one("""
+            SELECT COUNT(DISTINCT CASE WHEN sent_at IS NOT NULL THEN contact_id END) AS people_contacted,
+                   COALESCE(SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END),0) AS requests_sent,
+                   COALESCE(SUM(CASE WHEN sent_at IS NOT NULL AND julianday(sent_at)>=julianday('now','-7 days') THEN 1 ELSE 0 END),0) AS requests_week,
+                   COALESCE(SUM(CASE WHEN state IN ('replied','offered','submitted') THEN 1 ELSE 0 END),0) AS replies,
+                   COALESCE(SUM(CASE WHEN state IN ('offered','submitted') THEN 1 ELSE 0 END),0) AS offered,
+                   COALESCE(SUM(CASE WHEN state='submitted' THEN 1 ELSE 0 END),0) AS submitted
+            FROM outreach""")
+        discovered = self.one("""SELECT COALESCE(SUM(fresh),0) AS discovered_week FROM scans
+            WHERE state='completed' AND julianday(started_at)>=julianday('now','-7 days')""")
+        replies_week = self.one("""SELECT COUNT(DISTINCT outreach_id) AS count FROM events
+            WHERE kind IN ('replied','reply_detected') AND julianday(at)>=julianday('now','-7 days')""")["count"]
+        return {**jobs, **outreach, "discovered_week": discovered["discovered_week"], "replies_week": replies_week}
 
     def last_full_scan(self):
         return self.one("SELECT * FROM scans WHERE scope='full' AND state='completed' ORDER BY id DESC LIMIT 1")
@@ -347,6 +392,26 @@ class Store:
                               (company_id, *[job[field] for field in JOB_FIELDS], observed, observed, scan_id, manual))
         return result.lastrowid, True
 
+    def record_check(self, job_id, status, detail, source, checked_at):
+        """Remember one employer-side observation; a failed request is never stored as an absence."""
+        if status not in POSTING_CHECK_STATUSES:
+            raise ValueError("Unknown posting check status.")
+        with self.connect() as conn:
+            conn.execute("INSERT INTO posting_checks(job_id,status,detail,source,checked_at) VALUES(?,?,?,?,?)",
+                         (job_id, status, detail, source, checked_at))
+            conn.execute("""DELETE FROM posting_checks WHERE job_id=? AND id NOT IN
+                            (SELECT id FROM posting_checks WHERE job_id=? ORDER BY id DESC LIMIT ?)""",
+                         (job_id, job_id, POSTING_CHECK_HISTORY))
+        return {"status": status, "detail": detail, "source": source, "checked_at": checked_at}
+
+    def latest_check(self, job_id, source=None):
+        sql = "SELECT status,detail,source,checked_at FROM posting_checks WHERE job_id=?"
+        params = [job_id]
+        if source is not None:
+            sql += " AND source=?"
+            params.append(source)
+        return self.one(sql + " ORDER BY id DESC LIMIT 1", tuple(params))
+
     def jobs(self, *, view, region, search, latest, all_levels, offset, early_only=False, recent_days=0, date_basis="either"):
         args = []
         clauses = []
@@ -390,8 +455,15 @@ class Store:
             rows = [dict(row) for row in conn.execute(f"""SELECT j.id,j.title,j.location,j.url,j.apply_url,j.posted_at,j.first_seen,j.last_seen,j.new_scan,
                                    j.region,j.evidence,j.reason,j.score,j.saved,j.applied_at,j.archived,j.manual,j.hidden,
                                    j.deadline_at,j.application_target,j.description AS _description,
-                                   c.name AS company,c.provider,c.status AS source_status
-                            FROM jobs j JOIN companies c ON c.id=j.company_id WHERE {where}
+                                   c.name AS company,c.provider,c.status AS source_status,
+                                   pc.status AS check_status, pc.detail AS check_detail, pc.checked_at AS check_checked_at,
+                                   CASE WHEN pc.id IS NULL THEN NULL WHEN pc.checked_at<j.last_seen THEN 1 ELSE 0 END AS check_stale
+                            FROM jobs j JOIN companies c ON c.id=j.company_id
+                            LEFT JOIN posting_checks pc ON pc.id=(
+                                SELECT p.id FROM posting_checks p
+                                WHERE p.job_id=j.id AND p.source=(CASE WHEN c.provider='' THEN '' ELSE c.provider || ':' || j.external_id END)
+                                ORDER BY p.id DESC LIMIT 1)
+                            WHERE {where}
                             ORDER BY {order} LIMIT 31 OFFSET ?""", (*args, offset)).fetchall()]
         for row in rows:
             row["graduation_warning"] = graduation_warning(row.pop("_description"), year)
@@ -407,6 +479,10 @@ class Store:
             row["referrals"] = self.all("""SELECT o.id, o.contact_id, o.channel, o.state, o.due_at, c.name AS person
                 FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.job_id=?
                 ORDER BY o.state IN ('closed','submitted'), o.id DESC""", (job_id,))
+            check = self.latest_check(job_id, posting_source(row["provider"], row["external_id"]))
+            if check:
+                check["stale"] = bool(row["last_seen"]) and check["checked_at"] < row["last_seen"]
+            row["check"] = check
         return row
 
     def inbox(self):

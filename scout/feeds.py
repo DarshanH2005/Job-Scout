@@ -438,6 +438,14 @@ def normalize_rows(provider, rows):
     return [job for row in rows if (job := normalize(provider, row))]
 
 
+def feed_failure(exc):
+    """Label an employer-side HTTP error so a temporary edge outage does not read as a retired board."""
+    status = exc.response.status_code
+    if status == 429 or status >= 500:
+        return f"Employer feed temporarily unavailable (HTTP {status})."
+    return f"Employer feed returned HTTP {status}."
+
+
 async def fetch_board(client, company, limit):
     provider = company["provider"]
     async with limit:
@@ -499,7 +507,7 @@ async def fetch_board(client, company, limit):
                 await asyncio.gather(*(enrich_smart(i) for i in candidates[:20]))
             return jobs, None
         except httpx.HTTPStatusError as exc:
-            return [], f"Employer feed returned HTTP {exc.response.status_code}."
+            return [], feed_failure(exc)
         except WorkdaySnapshotError as exc:
             return [], str(exc)
         except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
@@ -516,7 +524,9 @@ async def fetch_json(client, url, params=None, json_body=None):
             return response.json()
         except httpx.HTTPStatusError as exc:
             retry_after = exc.response.headers.get("Retry-After")
-            if attempt or exc.response.status_code not in {429, 502, 503, 504}:
+            status = exc.response.status_code
+            # Cloudflare reports an unreachable origin as 521-526, so every 5xx is worth one retry.
+            if attempt or (status != 429 and status < 500):
                 raise
             if retry_after and (not retry_after.isdecimal() or len(retry_after) > 2 or int(retry_after) > 4):
                 raise

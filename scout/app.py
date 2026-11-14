@@ -20,11 +20,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import AwareDatetime, BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import autostart, credentials
+from . import autostart, backup, credentials
 from .feeds import PROVIDERS, REGIONS, assess, board_from_job_url, build_job, canonical_url, clean, eligibility_evidence, fetch_board, fetch_json, geography, graduation_warning, public_url, smartrecruiters_detail, work_authorization_evidence, workday_base, workday_detail, workday_path
 from .gmail import Gmail, REVIEWABLE_ISSUES, headers, incoming_reply, parse_reviewed_ids, reviewable_message_ids, thread_review_snapshot
 from .research import ResearchCache, find_people, rewrite
-from .store import OUTREACH_SELECT, Store, now
+from .store import OUTREACH_SELECT, Store, now, posting_source
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT.parent / ".env")
@@ -32,6 +32,9 @@ APP_DATA = Path(os.getenv("LOCALAPPDATA") or ROOT.parent) / "JobScout"
 CHANNELS = ("linkedin", "gmail", "community")
 GMAIL_SCHEDULE_INTERVAL = 30
 SCAN_SCHEDULE_INTERVAL = 60
+BACKUP_CHECK_INTERVAL = 3600
+BACKUP_MINIMUM_AGE = 24 * 3600
+DEFAULT_BACKUP_KEEP = 3
 
 
 class CompanyInput(BaseModel):
@@ -63,6 +66,11 @@ class CandidateProfile(BaseModel):
 
 class AutomaticScan(BaseModel):
     enabled: bool
+
+
+class BackupSetting(BaseModel):
+    auto: bool = True
+    keep: int = Field(default=DEFAULT_BACKUP_KEEP, ge=1, le=20)
 
 
 class ContactInput(BaseModel):
@@ -280,12 +288,34 @@ def automatic_scan_due(store):
         return now()
 
 
+def backup_due(store):
+    """Back up at most once a day, and never when automatic backups are switched off."""
+    if store.setting("backup_auto", "1") != "1":
+        return False
+    last = store.setting("last_backup_at")
+    if not last:
+        return True
+    try:
+        started = datetime.fromisoformat(last)
+    except (ValueError, TypeError):
+        return True
+    if started.tzinfo is None:
+        return True
+    return (datetime.now(timezone.utc) - started).total_seconds() >= BACKUP_MINIMUM_AGE
+
+
 async def verify_listing(store, job_id):
-    """Check one saved job against its employer source without changing scan state."""
+    """Check one saved job against its employer source and remember the employer's answer."""
     saved = job_or_404(store, job_id)
     company = store.one("SELECT * FROM companies WHERE id=?", (saved["company_id"],))
     if not company or saved["manual"] or company["provider"] not in PROVIDERS:
         return {"status":"manual", "checked_at":None, "detail":"Open the posting to verify this manually added role."}
+    source = posting_source(company["provider"], saved["external_id"])
+
+    def checked(status, detail, stamp):
+        # A failed request is stored as "could not check", never as "no longer listed".
+        store.record_check(job_id, status, detail, source, stamp)
+        return {"status":status, "checked_at":stamp, "detail":detail, "source":source}
     if company["provider"] in {"greenhouse", "lever", "smartrecruiters"}:
         stamp = now()
         try:
@@ -310,7 +340,7 @@ async def verify_listing(store, job_id):
                 if detail["company"]["identifier"].casefold() != board.casefold():
                     raise ValueError("The employer did not match.")
                 if detail.get("active") is False:
-                    return {"status":"not_listed", "checked_at":stamp, "detail":"The employer marked this posting inactive."}
+                    return checked("not_listed", "The employer marked this posting inactive.", stamp)
                 if detail.get("active") is not True:
                     raise ValueError("The employer did not confirm the posting is active.")
                 public = f"https://jobs.smartrecruiters.com/{board_part}/{id_part}"
@@ -318,13 +348,13 @@ async def verify_listing(store, job_id):
                 public = detail.get("absolute_url") if provider == "greenhouse" else detail.get("hostedUrl")
             if not public_url(public) or canonical_url(public) != saved["canonical_url"]:
                 raise ValueError("The employer link changed.")
-            return {"status":"listed", "checked_at":stamp, "detail":"The employer returned this posting."}
+            return checked("listed", "The employer returned this posting.", stamp)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
-                return {"status":"not_listed", "checked_at":stamp, "detail":"The employer did not return this posting."}
-            return {"status":"unavailable", "checked_at":stamp, "detail":"The employer posting could not be checked."}
+                return checked("not_listed", "The employer did not return this posting.", stamp)
+            return checked("unavailable", "The employer posting could not be checked.", stamp)
         except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
-            return {"status":"unavailable", "checked_at":stamp, "detail":"The employer posting could not be checked."}
+            return checked("unavailable", "The employer posting could not be checked.", stamp)
     if company["provider"] == "workday":
         stamp = now()
         try:
@@ -336,22 +366,22 @@ async def verify_listing(store, job_id):
             if canonical_url(info["externalUrl"]) != canonical_url(public_base + path):
                 raise ValueError("The employer posting did not match.")
             if info.get("canApply") is not True:
-                return {"status":"unavailable", "checked_at":stamp, "detail":"The employer did not confirm that applications are open."}
-            return {"status":"listed", "checked_at":stamp, "detail":"The employer's posting is accepting applications."}
+                return checked("unavailable", "The employer did not confirm that applications are open.", stamp)
+            return checked("listed", "The employer's posting is accepting applications.", stamp)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
-                return {"status":"not_listed", "checked_at":stamp, "detail":"The employer posting was not found."}
-            return {"status":"unavailable", "checked_at":stamp, "detail":"The employer posting could not be checked."}
+                return checked("not_listed", "The employer posting was not found.", stamp)
+            return checked("unavailable", "The employer posting could not be checked.", stamp)
         except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
-            return {"status":"unavailable", "checked_at":stamp, "detail":"The employer posting could not be checked."}
+            return checked("unavailable", "The employer posting could not be checked.", stamp)
     async with httpx.AsyncClient(timeout=12) as client:
         postings, error = await fetch_board(client, company, asyncio.Semaphore(1))
     stamp = now()
     if error:
-        return {"status":"unavailable", "checked_at":stamp, "detail":error}
+        return checked("unavailable", error, stamp)
     listed = any(posting["external_id"] == saved["external_id"] or posting["canonical_url"] == saved["canonical_url"]
                  for posting in postings)
-    return {"status":"listed" if listed else "not_listed", "checked_at":stamp, "detail":""}
+    return checked("listed" if listed else "not_listed", "", stamp)
 
 
 def create_app(db_path=None, seed=True):
@@ -384,6 +414,29 @@ def create_app(db_path=None, seed=True):
             except Exception:
                 import logging
                 logging.exception("Could not start the automatic job scan")
+
+    def backup_keep():
+        value = store.setting("backup_keep", str(DEFAULT_BACKUP_KEEP))
+        return int(value) if value.isdecimal() and 1 <= int(value) <= 20 else DEFAULT_BACKUP_KEEP
+
+    backup_lock = asyncio.Lock()
+
+    async def run_backup():
+        async with backup_lock:
+            info = await asyncio.to_thread(backup.create, store.path, None, backup_keep())
+            store.set_setting("last_backup_at", now())
+            store.set_setting("last_backup_path", info["path"])
+            return info
+
+    async def backup_loop():
+        while True:
+            try:
+                if backup_due(store):
+                    await run_backup()
+            except Exception:
+                import logging
+                logging.exception("Automatic database backup failed")
+            await asyncio.sleep(BACKUP_CHECK_INTERVAL)
 
     async def follow_up_loop():
         while True:
@@ -438,12 +491,14 @@ def create_app(db_path=None, seed=True):
         worker = asyncio.create_task(mail_loop())
         follow_ups = asyncio.create_task(follow_up_loop())
         automatic_scans = asyncio.create_task(automatic_scan_loop())
+        backups = asyncio.create_task(backup_loop())
         _app.state.follow_ups = follow_ups
         _app.state.automatic_scans = automatic_scans
+        _app.state.backups = backups
         try:
             yield
         finally:
-            for task in (worker, follow_ups, automatic_scans, scanner.task):
+            for task in (worker, follow_ups, automatic_scans, backups, scanner.task):
                 if task and not task.done():
                     task.cancel()
                     with suppress(asyncio.CancelledError):
@@ -479,6 +534,7 @@ def create_app(db_path=None, seed=True):
         account = store.setting("gmail_account")
         return {"stats": store.stats(), "scan": store.one("SELECT * FROM scans ORDER BY id DESC LIMIT 1"),
                 "full_scan": store.last_full_scan(),
+                "progress": store.progress(),
                 "graduation_year": store.graduation_year(),
                 "auto_scan": {"enabled": store.setting("automatic_scan") == "1", "next_at": automatic_scan_due(store),
                               "available": bool(getattr(app.state, "automatic_scans", None) and not app.state.automatic_scans.done())},
@@ -492,7 +548,22 @@ def create_app(db_path=None, seed=True):
                          "from_env": bool(os.getenv("SCOUT_GOOGLE_CLIENT_FILE")),
                          "checked_at": store.setting("gmail_checked_at"),
                          "issue": store.setting("gmail_issue"),
-                         "linkedin_hints": store.setting("linkedin_hints") == "1"}}
+                         "linkedin_hints": store.setting("linkedin_hints") == "1"},
+                "backup": {"last_at": store.setting("last_backup_at"), "last_path": store.setting("last_backup_path"),
+                           "directory": str(backup.default_directory(store.path)), "keep": backup_keep(),
+                           "auto": store.setting("backup_auto", "1") == "1",
+                           "files": backup.recent(backup.default_directory(store.path), limit=5),
+                           "available": bool(getattr(app.state, "backups", None) and not app.state.backups.done())}}
+
+    @app.post("/api/backup")
+    async def make_backup():
+        return await run_backup()
+
+    @app.put("/api/backup")
+    async def update_backup(data: BackupSetting):
+        store.set_setting("backup_auto", "1" if data.auto else "0")
+        store.set_setting("backup_keep", str(data.keep))
+        return {"auto": data.auto, "keep": data.keep}
 
     @app.put("/api/profile")
     async def update_profile(data: CandidateProfile):
@@ -587,6 +658,10 @@ def create_app(db_path=None, seed=True):
                         (name, url, provider, board if provider else "", data.enabled, status,
                          "" if changed else current["note"], None if changed else current["checked_at"],
                          None if changed else current["successful_at"], company_id))
+                    if changed:
+                        # Stored checks describe the previous employer source, so they no longer apply.
+                        conn.execute("DELETE FROM posting_checks WHERE job_id IN (SELECT id FROM jobs WHERE company_id=?)",
+                                     (company_id,))
             return store.one("SELECT * FROM companies WHERE id=?", (company_id,))
         except sqlite3.IntegrityError:
             fail("This company is already on your watchlist.", 409)

@@ -8,6 +8,7 @@ const stages = {draft:"Draft",waiting:"Waiting for reply",replied:"Replied",offe
 const historyLabels = {sent:"Request sent",checked:"Checked, no reply",snoozed:"Snoozed",followed_up:"Follow-up sent",replied:"Reply recorded",offered:"Referral offered",submitted:"Referral submitted",closed:"Closed",undo_send:"Send corrected",reply_detected:"Gmail reply detected",schedule_resumed:"Schedule resumed"};
 const E = (x = "") => String(x ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const num = x => Number(x ?? 0).toLocaleString();
+const count = (n,one,many) => `${num(n)} ${n===1?one:many}`;
 const date = (x, time=false) => {
   const d = new Date(typeof x==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(x)?`${x}T00:00:00`:x);
   return x && Number.isFinite(d.valueOf()) ? d.toLocaleDateString(undefined,{month:"short",day:"numeric",...(time?{hour:"numeric",minute:"2-digit"}:{})}) : "—";
@@ -15,6 +16,18 @@ const date = (x, time=false) => {
 const B = (label,action,id="",style="") => `<button type="button" class="button ${style}" data-action="${action}" data-id="${E(id)}">${E(label)}</button>`;
 const L = (label,url,style="small") => `<a class="button ${style}" href="${E(url)}" target="_blank" rel="noopener noreferrer">${E(label)} ↗</a>`;
 const tag = (label,style="") => `<span class="badge ${style}">${E(label)}</span>`;
+const checkLabels = {listed:"Listed on employer feed",not_listed:"Missing from employer feed",unavailable:"Posting check unavailable",manual:"Manual check needed"};
+function savedCheck(check) {
+  if(!check) return "";
+  const when = check.checked_at ? `<span>Checked ${date(check.checked_at,true)}</span>` : "";
+  const note = check.detail ? `<span>${E(check.detail)}</span>` : "";
+  const stale = check.stale ? `<span>· out of date: the feed was scanned after this check</span>` : "";
+  return `${tag(checkLabels[check.status]||check.status, check.status==="listed"?"good":"warn")} ${when} ${note} ${stale}`;
+}
+function checkTag(job) {
+  if(!job.check_status||job.check_status==="listed"||job.check_stale) return "";
+  return tag(`${checkLabels[job.check_status]||job.check_status} · ${date(job.check_checked_at)}`,"warn");
+}
 const head = (title,text,action="",h="h1") => `<div class="page-head"><div><${h}>${E(title)}</${h}><p>${E(text)}</p></div><div class="actions">${action}</div></div>`;
 const empty = (title,text,action="") => `<div class="panel empty"><strong>${E(title)}</strong><p>${E(text)}</p>${action}</div>`;
 const select = (values,selected="") => Object.entries(values).map(([id,name])=>`<option value="${id}" ${id===selected?"selected":""}>${E(name)}</option>`).join("");
@@ -92,6 +105,23 @@ async function startScan(scope="full") {
   if(S.page!=="jobs") location.hash="jobs";
   scanStatus(); pollScan();
 }
+function progressPanel() {
+  const p=S.info?.progress||{};
+  const rows=[["Roles shortlisted",p.shortlisted],["Applications sent",p.applied],
+    ["People contacted",p.people_contacted],["Replies received",p.replies],["Referrals offered",p.offered]];
+  if(p.submitted) rows.push(["Referrals submitted",p.submitted]);
+  const next=
+    p.shortlisted===0?"Save a role you would actually apply to.":
+    p.people_contacted===0?"Pick one shortlisted role and ask a specific person about it.":
+    p.requests_sent>0&&p.replies===0?"No replies recorded yet. The referral inbox shows when a follow-up is due.":
+    p.replies>0&&p.offered===0?"A reply is progress. Ask directly whether they can refer you.":
+    p.offered>0&&!p.submitted?"Record the referral once the application is actually submitted.":
+    "Keep the queue short: review a role, contact one person, apply.";
+  return `<p class="eyebrow">YOUR PROGRESS</p><h3>Job search</h3><div class="coverage">
+    ${rows.map(([label,value])=>`<div><span>${E(label)}</span><strong>${num(value)}</strong></div>`).join("")}</div>
+    <p class="micro">Last 7 days · ${count(p.discovered_week,"new match","new matches")} · ${count(p.requests_week,"request","requests")} · ${count(p.replies_week,"reply","replies")} · ${count(p.applied_week,"application","applications")}</p>
+    <p class="hint">${E(next)}</p>`;
+}
 function coverage() {
   const {stats,scan,full_scan,auto_scan}=S.info;
   const full=scan?.scope==="full"&&scan.state==="running"?scan:full_scan;
@@ -112,7 +142,7 @@ function jobRow(job) {
   return `<article class="panel job-row"><div class="job-mark" aria-hidden="true">${E(mark)}</div>
     <div><div class="job-company">${E(job.company)} · ${job.posted_at?"Posted":"First seen"} ${date(job.posted_at||job.first_seen)}</div>
     <button class="job-title" data-action="job" data-id="${job.id}">${E(job.title)}</button>
-    <div class="meta">${tag(regions[job.region],job.region.startsWith("india")?"good":"")}${freshness}${job.graduation_warning?tag("Check graduation year","warn"):""}${job.hidden?tag("Hidden from feed"):""}${job.applied_at?tag("Applied","good"):""}
+    <div class="meta">${tag(regions[job.region],job.region.startsWith("india")?"good":"")}${freshness}${checkTag(job)}${job.graduation_warning?tag("Check graduation year","warn"):""}${job.hidden?tag("Hidden from feed"):""}${job.applied_at?tag("Applied","good"):""}
     ${!job.applied_at&&job.application_target?tag(`Your target ${date(job.application_target)}`,"good"):""}
     ${!job.applied_at&&job.deadline_at?tag(`Employer deadline ${date(job.deadline_at)}`,"warn"):""}</div>
     <div class="micro">${E(job.reason)}</div></div><div class="actions">${B("Review","job",job.id,"small")}${L("Apply",job.apply_url)}</div></article>`;
@@ -171,7 +201,7 @@ function jobPage() {
     <select id="recent" aria-label="Job date filter">${select({"0":"Any date","posted_7":"Posted in last 7 days","posted_30":"Posted in last 30 days","seen_7":"First seen in last 7 days","seen_30":"First seen in last 30 days"},S.recent)}</select>
     <label><input type="checkbox" id="latest" ${S.latest?"checked":""}> New since last scan</label></div>`}
     <div id="job-results" aria-busy="true"><div class="panel loading">Loading jobs…</div></div></div>
-    <aside class="aside"><div class="panel" id="coverage-panel">${coverage()}</div><div class="panel"><p class="eyebrow">FROM JOB TO REFERRAL</p>
+    <aside class="aside"><div class="panel">${progressPanel()}</div><div class="panel" id="coverage-panel">${coverage()}</div><div class="panel"><p class="eyebrow">FROM JOB TO REFERRAL</p>
     <h3>What to do next</h3><ol><li>Review a role and its location.</li><li>Find someone relevant to ask.</li><li>Send your message and log it.</li></ol>
     <a href="#outreach">Open referral inbox →</a></div></aside></div>`;
 }
@@ -179,7 +209,7 @@ const sourceLabels={pending:"Ready to scan",checked:"Checked",failed:"Failed",un
 function companyRows() {
   const rows=S.companies.filter(row=>row.name.toLowerCase().includes(S.companySearch.toLowerCase().trim())&&(!S.source||S.source===(row.enabled?row.status:"disabled")));
   return rows.length?`<div class="panel">${rows.map(row=>`<div class="company-row"><div><strong>${E(row.name)}</strong>
-    <span class="micro">${E(row.provider||"Employer careers page")}${row.checked_at?` · ${date(row.checked_at,true)}`:""}${row.note?` · ${E(row.note)}`:""}</span></div>
+    <span class="micro">${E(row.provider||"Employer careers page")}${row.checked_at?` · checked ${date(row.checked_at,true)}`:""}${row.status==="failed"&&row.successful_at?` · last succeeded ${date(row.successful_at,true)}`:""}${row.note?` · ${E(row.note)}`:""}</span></div>
     <div class="actions">${tag(sourceLabels[row.enabled?row.status:"disabled"],row.status==="checked"?"good":row.status==="failed"?"warn":"")}${L("Careers",row.url)}${B("Edit","company",row.id,"small")}</div></div>`).join("")}</div>`:
     empty("No companies match","Change the search or source filter.");
 }
@@ -219,7 +249,8 @@ async function inbox() {
     <div class="panel">${rows.map(inboxRow).join("")}</div></section>`).join(""):empty("No conversations yet","Open a job, find someone to ask, and prepare a draft.",'<a href="#jobs">Browse the job feed →</a>')}`;
 }
 function settings() {
-  const {mail,search_configured,search_from_env,rewrite_configured,auto_scan,startup}=S.info;
+  const {mail,search_configured,search_from_env,rewrite_configured,auto_scan,startup,backup}=S.info;
+  const backupSize=(backup?.files||[]).reduce((total,file)=>total+file.size,0);
   return `${head("Settings","Connect optional services for public research and reply checks.")}
   <div class="settings-grid">
     <section class="panel padded"><h3>Automatic job scans</h3><p>Check the watchlist every 24 hours while Job Scout runs. If it was closed when a scan was due, it checks after reopening. Scans use no AI tokens.</p>
@@ -254,6 +285,13 @@ function settings() {
     ${mail.issue?`<p class="evidence">${E(mail.issue)}</p>`:""}</section>
     <section class="panel padded"><h3>LinkedIn notification hints</h3><p>Use a Gmail filter to label LinkedIn message notifications <strong>Job Scout LinkedIn</strong>. Labeled message notifications become reminders to check LinkedIn.</p>
     <label class="checklabel"><input type="checkbox" id="mail-hints" ${mail.linkedin_hints?"checked":""} ${mail.account?"":"disabled"}> Show LinkedIn email hints</label></section>
+    <section class="panel padded"><h3>Data backup</h3><p>Job Scout keeps verified copies of your jobs, contacts and conversations. It saves one automatically each day and keeps the ${num(backup?.keep||3)} most recent.</p>
+    ${backup?.last_at?`<p><strong>Last backup</strong> ${date(backup.last_at,true)}<br><span class="micro">${E((backup.last_path||"").split(/[\\/]/).pop())} · ${num(backup.files?.length)} saved · ${Math.max(1,Math.round(backupSize/1048576))} MB</span></p>`:tag("No backup yet","warn")}
+    <div class="actions">${B("Back up now","backup-now","","small")}${backup?.available?"":tag("Automatic backups unavailable","warn")}</div>
+    <form class="form section" data-form="backup"><label class="checklabel"><input type="checkbox" name="auto" ${backup?.auto?"checked":""}> Back up automatically once a day</label>
+    <label>Copies to keep<input type="number" name="keep" min="1" max="20" step="1" value="${E(backup?.keep||3)}"></label>
+    <div><button class="button small">Save backup settings</button></div></form>
+    <p class="hint">Stored in ${E(backup?.directory||"")}. Backups are compressed. To restore, close Job Scout and run <code>python -m scout.backup --restore latest</code> from the app folder.</p></section>
   </div>`;
 }
 async function render() {
@@ -318,7 +356,7 @@ function showJob() {
     ${L("Apply on company site",job.apply_url,"primary")}${B(job.saved?"Remove from saved":"Save job","save",job.id)}${B(job.applied_at?"Undo applied":"Mark applied","apply",job.id)}
     ${B(job.hidden?"Restore to job feed":"Hide from job feed","hide",job.id)}</div>
     <div class="actions">${B("Check this posting","verify-job",job.id,"small")}
-      <span class="micro" id="listing-check-result" role="status"></span></div>
+      <span class="micro" id="listing-check-result" role="status">${savedCheck(job.check)}</span></div>
     <p class="micro">${job.posted_at?`Employer posted ${date(job.posted_at)} · `:""}First seen ${date(job.first_seen)}${job.archived?" · Absent in recent scans":job.source_status==="failed"?" · Latest scan could not reach this feed":""}</p>
     ${job.deadline_at?`<p>${tag("Employer deadline","warn")} ${date(job.deadline_at,job.deadline_at.includes("T"))}</p>`:""}
     <details class="section" ${job.application_target?"open":""}><summary>${job.application_target?`Your target date · ${date(job.application_target)}`:"Set a target application date"}</summary>
@@ -349,10 +387,9 @@ async function verifyJob(id) {
   try {
     const result=await api(`/jobs/${id}/verify`,"POST");
     if(!target.isConnected) return;
-    const labels={listed:"Listed on employer feed",not_listed:"Missing from employer feed",unavailable:"Feed unavailable",manual:"Manual check needed"};
-    target.innerHTML=`${tag(labels[result.status],result.status==="listed"?"good":"warn")}
-      ${result.checked_at?` <span>Checked ${date(result.checked_at,true)}</span>`:""}
-      ${result.detail?` <span>${E(result.detail)}</span>`:""}`;
+    const check={status:result.status,detail:result.detail,checked_at:result.checked_at,stale:false};
+    if(S.job?.id===id) S.job.check=check;
+    target.innerHTML=savedCheck(check);
   } catch(error) {
     if(target.isConnected) target.textContent="Could not check the listing.";
     throw error;
@@ -649,6 +686,11 @@ async function act(action,id) {
       notice(S.info.mail.issue?`${replyNotice} ${S.info.mail.issue}`:replyNotice,!!S.info.mail.issue);
     },
     "mail-threads":()=>mailThreads(id),
+    "backup-now":async()=>{
+      const info=await api("/backup","POST");
+      await refreshState();await render();
+      notice(`Backup saved · ${Math.max(1,Math.round(info.size/1048576))} MB.`);
+    },
     "hint-dismiss":async()=>{await api(`/gmail/hints/${encodeURIComponent(id)}/dismiss`,"POST");await render();},
   };
   await handlers[action]?.();
@@ -686,6 +728,10 @@ document.addEventListener("submit",event=>{
       case "startup":
         await api("/windows-startup","PUT",{enabled:data.enabled==="on"});
         await refreshState();await render();notice("Windows startup setting updated.");
+        break;
+      case "backup":
+        await api("/backup","PUT",{auto:data.auto==="on",keep:Number(data.keep)});
+        await refreshState();await render();notice("Backup settings updated.");
         break;
       case "brave":
         await saveIntegration("brave",data.value);

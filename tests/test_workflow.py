@@ -1762,7 +1762,7 @@ def test_workday_source_migration_preserves_customized_company(tmp_path):
 def test_new_workday_sources_preserve_customized_watchlist(tmp_path):
     store = Store(tmp_path / "migration.sqlite3")
     store.initialize(seed=True)
-    assert store.one("SELECT count(*) AS count FROM companies WHERE provider<>''")["count"] == 170
+    assert store.one("SELECT count(*) AS count FROM companies WHERE provider<>''")["count"] == 169
     store.write("UPDATE companies SET provider='',board='',status='unsupported',enabled=0 WHERE name='CrowdStrike'")
     store.write("UPDATE companies SET provider='',board='',url='https://custom.example/jobs' WHERE name='Mastercard'")
     store.write("DELETE FROM settings WHERE key='sources_workday_2'")
@@ -2376,11 +2376,100 @@ def test_verify_posting_distinguishes_presence_absence_and_feed_failure(desk, mo
     error = "HTTP 503"
     check = result(client.post(path + "/verify"))
     assert check["status"] == "unavailable" and check["detail"] == error and check["checked_at"]
-    assert result(client.get(path)) == original
+    after = result(client.get(path))
+    assert {key: value for key, value in after.items() if key != "check"} == {
+        key: value for key, value in original.items() if key != "check"}
+    assert after["check"]["status"] == "unavailable" and after["check"]["stale"] is False
+    assert not after["archived"] and after["misses"] == 0
     assert result(client.get("/api/state"))["full_scan"]["id"] == full["id"]
     manual = saved_job(client)
     assert result(client.post(f"/api/jobs/{manual['id']}/verify"))["status"] == "manual"
     assert calls == ["sample"] * 4
+
+
+def test_posting_check_is_persisted_and_survives_a_restart(tmp_path, monkeypatch):
+    db = tmp_path / "checks.sqlite3"
+
+    async def fetch(_client, _company, _limit):
+        return [sample()], None
+
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765") as client:
+        register(client, provider="ashby", url="https://jobs.ashbyhq.com/sample")
+        scan(client)
+        job = result(client.get("/api/jobs"))["items"][0]
+        path = f"/api/jobs/{job['id']}"
+        assert result(client.get(path))["check"] is None
+        assert result(client.post(path + "/verify"))["status"] == "listed"
+        stored = result(client.get(path))["check"]
+        assert (stored["status"], stored["stale"]) == ("listed", False)
+        assert (result(client.get("/api/jobs"))["items"][0]["check_status"],
+                result(client.get("/api/jobs"))["items"][0]["check_stale"]) == ("listed", 0)
+    with TestClient(app_module.create_app(db, seed=False), base_url="http://127.0.0.1:8765") as client:
+        reopened = result(client.get(path))["check"]
+        assert (reopened["status"], reopened["checked_at"]) == ("listed", stored["checked_at"])
+        assert reopened["stale"] is False
+
+
+def test_failed_posting_check_is_remembered_as_unavailable_not_absent(desk, monkeypatch):
+    client, _ = desk
+    register(client, provider="ashby", url="https://jobs.ashbyhq.com/sample")
+    state = {"rows": [sample()], "error": None}
+
+    async def fetch(_client, _company, _limit):
+        return state["rows"], state["error"]
+
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    scan(client)
+    job = result(client.get("/api/jobs"))["items"][0]
+    path = f"/api/jobs/{job['id']}"
+    state["error"] = "HTTP 503"
+    assert result(client.post(path + "/verify"))["status"] == "unavailable"
+    after = result(client.get(path))
+    assert after["check"]["status"] == "unavailable" and not after["archived"]
+    listing = result(client.get("/api/jobs"))["items"][0]
+    assert (listing["check_status"], listing["check_stale"]) == ("unavailable", 0)
+
+
+def test_a_later_scan_makes_a_stored_posting_check_out_of_date(desk, monkeypatch):
+    client, _ = desk
+    register(client, provider="ashby", url="https://jobs.ashbyhq.com/sample")
+    rows = [sample()]
+
+    async def fetch(_client, _company, _limit):
+        return rows, None
+
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    scan(client)
+    job = result(client.get("/api/jobs"))["items"][0]
+    path = f"/api/jobs/{job['id']}"
+    rows = []
+    assert result(client.post(path + "/verify"))["status"] == "not_listed"
+    assert result(client.get(path))["check"]["stale"] is False
+    rows = [sample()]
+    scan(client)
+    listing = result(client.get("/api/jobs"))["items"][0]
+    assert (listing["check_status"], listing["check_stale"]) == ("not_listed", 1)
+
+
+def test_changing_an_employer_source_clears_its_stored_posting_checks(desk, monkeypatch):
+    client, _ = desk
+    company = register(client, provider="ashby", url="https://jobs.ashbyhq.com/sample")
+    rows = [sample()]
+
+    async def fetch(_client, _company, _limit):
+        return rows, None
+
+    monkeypatch.setattr(app_module, "fetch_board", fetch)
+    scan(client)
+    job = result(client.get("/api/jobs"))["items"][0]
+    path = f"/api/jobs/{job['id']}"
+    assert result(client.post(path + "/verify"))["status"] == "listed"
+    assert result(client.get(path))["check"]["status"] == "listed"
+    result(client.patch(f"/api/companies/{company['id']}", json={
+        "name": company["name"], "url": company["url"], "provider": "ashby",
+        "board": "other", "enabled": True}))
+    assert result(client.get(path))["check"] is None
 
 
 @pytest.mark.parametrize("provider,board,posting_id,public_url,host,path", [
@@ -2484,3 +2573,221 @@ def test_scheduled_request_pauses_when_live_posting_is_inactive(tmp_path, monkey
             time.sleep(.01)
         assert "no longer lists" in updated["initial_scheduled_issue"]
         assert not attempts and not updated["gmail_send_pending"] and updated["state"] == "draft"
+        assert store.one("SELECT status FROM posting_checks WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                         (job["id"],))["status"] == "not_listed"
+
+
+def test_transient_edge_errors_are_retried_once():
+    from scout.feeds import fetch_json
+    requests = []
+
+    def respond(request):
+        requests.append(request.url)
+        if len(requests) == 1:
+            return httpx.Response(521, text="origin unreachable")
+        return httpx.Response(200, json={"jobs": []})
+
+    async def read():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await fetch_json(client, "https://example.test/feed")
+
+    assert asyncio.run(read()) == {"jobs": []}
+    assert len(requests) == 2
+
+
+def test_temporary_feed_errors_are_reported_as_temporary():
+    from scout.feeds import feed_failure
+    request = httpx.Request("GET", "https://example.test/feed")
+
+    def message(status):
+        return feed_failure(httpx.HTTPStatusError("failed", request=request, response=httpx.Response(status, request=request)))
+
+    assert message(521) == "Employer feed temporarily unavailable (HTTP 521)."
+    assert message(503) == "Employer feed temporarily unavailable (HTTP 503)."
+    assert message(404) == "Employer feed returned HTTP 404."
+
+
+def test_registry_fix_repoints_tavily_and_marks_a16z_manual(tmp_path):
+    store = Store(tmp_path / "sources-fix.sqlite3")
+    store.initialize(seed=False)
+    store.write("DELETE FROM settings WHERE key='sources_fix_1'")
+    store.write("""INSERT INTO companies(name,url,provider,board,status,successful_at)
+                   VALUES('Tavily','https://jobs.ashbyhq.com/tavily','ashby','tavily','failed','2026-11-13T03:55:46+00:00')""")
+    store.write("""INSERT INTO companies(name,url,provider,board,status)
+                   VALUES('a16z','https://jobs.ashbyhq.com/a16z','ashby','a16z','failed')""")
+    store.initialize(seed=False)
+    tavily = store.one("SELECT * FROM companies WHERE name='Tavily'")
+    assert (tavily["provider"], tavily["board"], tavily["status"]) == ("greenhouse", "tavily", "pending")
+    assert tavily["url"] == "https://job-boards.eu.greenhouse.io/tavily"
+    assert tavily["successful_at"] is None
+    a16z = store.one("SELECT * FROM companies WHERE name='a16z'")
+    assert (a16z["provider"], a16z["status"], a16z["url"]) == ("", "unsupported", "https://jobs.a16z.com")
+
+
+def test_a_transient_feed_failure_keeps_the_last_success_time(desk, monkeypatch):
+    client, store = desk
+    company = register(client, provider="ashby", url="https://jobs.ashbyhq.com/sample")
+
+    async def healthy(_client, _company, _limit):
+        return [sample()], None
+
+    monkeypatch.setattr(app_module, "fetch_board", healthy)
+    scan(client)
+    first = store.one("SELECT successful_at FROM companies WHERE id=?", (company["id"],))["successful_at"]
+    assert first
+
+    async def unreachable(_client, _company, _limit):
+        return [], "Employer feed temporarily unavailable (HTTP 521)."
+
+    monkeypatch.setattr(app_module, "fetch_board", unreachable)
+    scan(client)
+    after = store.one("SELECT * FROM companies WHERE id=?", (company["id"],))
+    assert after["status"] == "failed"
+    assert after["note"] == "Employer feed temporarily unavailable (HTTP 521)."
+    assert after["successful_at"] == first
+
+
+def test_progress_reports_the_job_search_funnel(desk):
+    from datetime import datetime, timedelta, timezone
+    client, store = desk
+    assert result(client.get("/api/state"))["progress"] == {
+        "shortlisted": 0, "dismissed": 0, "applied": 0, "applied_week": 0,
+        "people_contacted": 0, "requests_sent": 0, "requests_week": 0,
+        "replies": 0, "offered": 0, "submitted": 0,
+        "discovered_week": 0, "replies_week": 0}
+
+    job = saved_job(client)
+    draft = create_draft(client, job)
+    progress = result(client.get("/api/state"))["progress"]
+    assert (progress["shortlisted"], progress["people_contacted"], progress["requests_sent"]) == (1, 0, 0)
+
+    action(client, draft, "sent")
+    action(client, draft, "replied")
+    action(client, draft, "offered")
+    result(client.patch(f"/api/jobs/{job['id']}", json={"applied": True}))
+    other = result(client.post("/api/jobs", json={
+        "company": "Other Company", "title": "Data Analyst", "url": "https://other.example/careers/7",
+        "location": "India", "description": "Analyze data."}), 201)
+    result(client.patch(f"/api/jobs/{other['id']}", json={"saved": False, "hidden": True}))
+    progress = result(client.get("/api/state"))["progress"]
+    assert (progress["people_contacted"], progress["requests_sent"], progress["replies"], progress["offered"]) == (1, 1, 1, 1)
+    assert (progress["applied"], progress["shortlisted"], progress["submitted"]) == (1, 1, 0)
+    assert progress["dismissed"] == 1 and progress["replies_week"] == 1
+
+    stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    store.write("""INSERT INTO scans(started_at,finished_at,state,scope,total,checked,fresh)
+                   VALUES(?,?,'completed','full',1,1,24)""", (stamp, stamp))
+    assert result(client.get("/api/state"))["progress"]["discovered_week"] == 24
+
+    old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(timespec="microseconds")
+    store.write("UPDATE outreach SET sent_at=? WHERE id=?", (old, draft["id"]))
+    store.write("UPDATE jobs SET applied_at=? WHERE id=?", (old, job["id"]))
+    store.write("UPDATE events SET at=? WHERE outreach_id=?", (old, draft["id"]))
+    store.write("UPDATE scans SET started_at=? WHERE started_at=?", (old, stamp))
+    progress = result(client.get("/api/state"))["progress"]
+    assert (progress["requests_week"], progress["applied_week"], progress["replies_week"], progress["discovered_week"]) == (0, 0, 0, 0)
+    assert (progress["requests_sent"], progress["applied"]) == (1, 1)
+
+
+def test_backup_snapshot_is_compressed_verified_and_pruned(tmp_path):
+    from datetime import datetime, timezone
+    from scout import backup
+    db = tmp_path / "scout.sqlite3"
+    store = Store(db)
+    store.initialize(seed=False)
+    store.write("""INSERT INTO companies(name,url,provider,board,status)
+                   VALUES('Acme','https://example.test','ashby','acme','checked')""")
+    info = backup.create(db, tmp_path / "backups", keep=2, now=datetime(2026, 11, 14, 9, 0, tzinfo=timezone.utc))
+    assert info["name"].endswith(".sqlite3.gz") and info["compressed"]
+    assert info["size"] < db.stat().st_size
+    assert backup.verify(info["path"], thorough=True)["counts"]["companies"] == 1
+    for hour in (10, 11):
+        backup.create(db, tmp_path / "backups", keep=2, now=datetime(2026, 11, 14, hour, tzinfo=timezone.utc))
+    kept = [item["name"] for item in backup.recent(tmp_path / "backups", 10)]
+    assert len(kept) == 2 and "-110000-" in kept[0] and "-100000-" in kept[1]
+    assert not list((tmp_path / "backups").glob("*.partial"))
+
+
+def test_restore_replaces_the_database_and_keeps_the_previous_copy(tmp_path):
+    from pathlib import Path
+    from scout import backup
+    db = tmp_path / "scout.sqlite3"
+    store = Store(db)
+    store.initialize(seed=False)
+    store.write("""INSERT INTO companies(name,url,provider,board,status)
+                   VALUES('Before','https://example.test','ashby','before','checked')""")
+    snapshot = backup.create(db, tmp_path / "backups")["path"]
+    store.write("""INSERT INTO companies(name,url,provider,board,status)
+                   VALUES('After','https://example.test','ashby','after','checked')""")
+    info = backup.restore(snapshot, db)
+    assert Path(info["safety_copy"]).is_file() and Path(info["safety_copy"]).parent.name == "safety"
+    assert Store(db).one("SELECT count(*) AS count FROM companies")["count"] == 1
+    assert Store(Path(info["safety_copy"])).one("SELECT count(*) AS count FROM companies")["count"] == 2
+
+
+def test_verify_rejects_files_that_are_not_a_backup(tmp_path):
+    from scout import backup
+    junk = tmp_path / "scout-backup-20260101-000000-000000.sqlite3"
+    junk.write_bytes(b"not a database")
+    with pytest.raises(ValueError, match="not a readable Job Scout database"):
+        backup.verify(junk)
+    broken_gzip = tmp_path / "scout-backup-20260102-000000-000000.sqlite3.gz"
+    broken_gzip.write_bytes(b"not gzip either")
+    with pytest.raises(ValueError, match="cannot be decompressed"):
+        backup.verify(broken_gzip)
+    with pytest.raises(ValueError, match="not found"):
+        backup.verify(tmp_path / "missing.sqlite3")
+
+
+def test_restore_refuses_while_the_database_is_open(tmp_path):
+    import sqlite3
+    from scout import backup
+    db = tmp_path / "scout.sqlite3"
+    store = Store(db)
+    store.initialize(seed=False)
+    snapshot = backup.create(db, tmp_path / "backups")["path"]
+    holder = sqlite3.connect(db)
+    try:
+        holder.execute("BEGIN IMMEDIATE")
+        with pytest.raises(ValueError, match="still in use"):
+            backup.restore(snapshot, db)
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+def test_backup_endpoint_saves_a_verified_snapshot(desk):
+    from pathlib import Path
+    from scout import backup
+    client, _ = desk
+    created = result(client.post("/api/backup"))
+    saved = Path(created["path"])
+    assert saved.is_file() and saved.name.endswith(".sqlite3.gz")
+    assert backup.verify(saved, thorough=True)["counts"]["companies"] >= 0
+    state = result(client.get("/api/state"))["backup"]
+    assert state["last_at"] and Path(state["last_path"]) == saved
+    assert state["directory"].endswith("backups") and state["files"][0]["name"] == saved.name
+
+
+def test_backup_settings_can_be_changed(desk):
+    client, _ = desk
+    result(client.put("/api/backup", json={"auto": False, "keep": 5}))
+    state = result(client.get("/api/state"))["backup"]
+    assert (state["auto"], state["keep"]) == (False, 5)
+    result(client.put("/api/backup", json={"auto": True, "keep": 0}), 422)
+
+
+def test_automatic_backup_is_daily_and_can_be_switched_off(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    store = Store(tmp_path / "backup-due.sqlite3")
+    store.initialize(seed=False)
+    store.set_setting("backup_auto", "0")
+    assert app_module.backup_due(store) is False
+    store.set_setting("backup_auto", "1")
+    store.set_setting("last_backup_at", "")
+    assert app_module.backup_due(store) is True
+    store.set_setting("last_backup_at", datetime.now(timezone.utc).isoformat(timespec="microseconds"))
+    assert app_module.backup_due(store) is False
+    store.set_setting("last_backup_at",
+                      (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(timespec="microseconds"))
+    assert app_module.backup_due(store) is True
