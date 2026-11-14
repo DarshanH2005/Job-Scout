@@ -2647,6 +2647,59 @@ def test_a_transient_feed_failure_keeps_the_last_success_time(desk, monkeypatch)
     assert after["successful_at"] == first
 
 
+def test_pilot_sheet_ranks_india_roles_and_never_writes(tmp_path):
+    from pathlib import Path
+    from scout import pilot
+    from scout.feeds import build_job
+    db = tmp_path / "pilot.sqlite3"
+    store = Store(db)
+    store.initialize(seed=False)
+
+    def make(conn, external_id, title, location, description, region, score, saved=0):
+        job = build_job(external_id, title, "Engineering", location, "", description, f"https://example.test/{external_id}")
+        job_id, _ = store.upsert_job(conn, company, job, "2026-11-10T00:00:00+00:00")
+        conn.execute("UPDATE jobs SET region=?, score=?, saved=? WHERE id=?", (region, score, saved, job_id))
+        return job_id
+
+    with store.connect() as conn:
+        company = conn.execute(
+            "INSERT INTO companies(name,url,provider,board,status) VALUES('Acme','https://x','ashby','acme','checked')"
+        ).lastrowid
+    with store.connect() as conn:
+        entry = make(conn, "1", "Junior Software Engineer", "Bengaluru, India", "Build services.", "india", 90)
+        experienced = make(conn, "2", "Software Engineer II", "Pune, India",
+                           "You will need 2+ years of experience building distributed systems.", "india", 55)
+        make(conn, "3", "Software Engineer II", "Pune, India", "Duplicate posting.", "india", 55)
+        make(conn, "4", "Software Engineer", "San Francisco, United States", "US only.", "other", 55)
+        saved = make(conn, "5", "Data Analyst", "Remote - India", "Analyse data.", "india_remote", 55, saved=1)
+
+    before = db.stat().st_size
+    report = pilot.build(db)
+    summary = report["summary"]
+    assert summary["feed_total"] == 5 and summary["india_eligible"] == 3
+    assert [row["title"] for row in report["rows"]][0] == "Junior Software Engineer"
+    assert any("2+ years of experience" in row["experience_stated"] for row in report["rows"])
+    assert any(row["already_saved"] == "saved" for row in report["rows"])
+    assert all(row["decision"] == "" for row in report["rows"])
+    assert db.stat().st_size == before
+
+    written = pilot.write(tmp_path / "kit", db)
+    assert Path(written["shortlist"]).is_file() and Path(written["ledger"]).is_file()
+    with pytest.raises(FileExistsError, match="Refusing to overwrite"):
+        pilot.write(tmp_path / "kit", db)
+    assert pilot.write(tmp_path / "kit", db, force=True)["summary"]["india_eligible"] == 3
+
+
+def test_pilot_cli_writes_the_sheet(tmp_path, capsys):
+    from scout import pilot
+    db = tmp_path / "pilot-cli.sqlite3"
+    Store(db).initialize(seed=False)
+    assert pilot.main(["--database", str(db), "--out", str(tmp_path / "kit")]) == 0
+    output = capsys.readouterr().out
+    assert "Five-job pilot sheet" in output and "Nothing was deleted" in output
+    assert (tmp_path / "kit" / "pilot-shortlist.csv").is_file()
+
+
 def test_storage_report_counts_retention_candidates_and_never_writes(tmp_path):
     from datetime import datetime, timedelta, timezone
     from scout import storage
